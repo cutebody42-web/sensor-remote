@@ -1,0 +1,14 @@
+[package]
+name = "sensor-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+postcard.workspace = true
+serde.workspace = true
+sensor-core = { path = "../sensor-core" }
+sha2.workspace = true
+thiserror.workspace = true
+

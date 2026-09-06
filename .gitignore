@@ -1,0 +1,7 @@
+/target/
+*.log
+*.dmp
+.env
+.env.*
+!.env.example
+

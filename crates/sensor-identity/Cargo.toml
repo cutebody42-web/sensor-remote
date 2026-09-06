@@ -1,0 +1,15 @@
+[package]
+name = "sensor-identity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+postcard.workspace = true
+rand_core.workspace = true
+serde.workspace = true
+sensor-core = { path = "../sensor-core" }
+sensor-crypto = { path = "../sensor-crypto" }
+thiserror.workspace = true
+zeroize.workspace = true

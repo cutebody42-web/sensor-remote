@@ -1,0 +1,17 @@
+[package]
+name = "sensor-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rand_core.workspace = true
+sensor-core = { path = "../sensor-core" }
+sensor-crypto = { path = "../sensor-crypto" }
+sensor-protocol = { path = "../sensor-protocol" }
+thiserror.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true
+
