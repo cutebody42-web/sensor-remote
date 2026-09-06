@@ -1,4 +1,4 @@
-FROM rust:1.98.1-bookworm
+FROM rust:1.98-bookworm
 
 WORKDIR /src
 COPY . .
