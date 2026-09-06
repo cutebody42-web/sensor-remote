@@ -15,6 +15,8 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 | git diff --check | PASS at verification |
 | Supplied JPEG versus embedded source | Identical SHA-256; automated exact-asset regression |
 | Native GUI launch | Window and real accessibility controls observed |
+| Windows PE metadata | x64 (0x8664), graphical subsystem 2, SENSOR company/product/version resources |
+| Artifact signing/runtime | Unsigned; imports VCRUNTIME140.dll; no bundled runtime installer |
 | Pixel-level/interactive GUI QA | BLOCKED: desktop lock screen; inspection stopped |
 
 The earlier unoptimized workspace suite passed 42 tests before the final six

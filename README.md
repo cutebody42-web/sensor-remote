@@ -43,6 +43,8 @@ See [parity](docs/PARITY_MATRIX.md) and [limitations](docs/KNOWN_LIMITATIONS.md)
 See [Windows guide](docs/WINDOWS_APP.md). The portable development executables
 are `SENSOR-Remote.exe` (desktop) and `SENSOR-CLI.exe` (console endpoint).
 They are unsigned: there is no supplied publisher signing certificate.
+Running this development build requires Direct3D 12 and the Visual C++ x64
+runtime (VCRUNTIME140.dll). Neither an installer nor a runtime installer is bundled.
 
 With Rust 1.98.1, MSVC build tools and Windows SDK installed:
 

@@ -36,3 +36,7 @@ desktop product and not production ready**.
   matrix, Windows 10/11/Server certification or 8+ hour stability evidence.
 - No publisher signature, MSI/installer, update mechanism or deployment server.
   No third-party policy or firewall rule was installed.
+- Current executable needs Direct3D 12 and VCRUNTIME140.dll (Visual C++ x64
+  runtime). Packaging records dependencies and collects available license files;
+  some registry crates omit license text, which the inventory flags with zero
+  collected files. Distribution/license review is not complete.

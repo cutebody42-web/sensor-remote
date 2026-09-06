@@ -5,6 +5,9 @@
 - Rust 1.98.1 x86_64-pc-windows-msvc, pinned in rust-toolchain.toml.
 - Visual Studio C++ Build Tools with x64 MSVC and Windows SDK.
 - Direct3D 12 capable graphics environment for the current native renderer.
+- Microsoft Visual C++ x64 runtime providing VCRUNTIME140.dll on the machine
+  running this build. The executable dependency table was inspected; this
+  development package does not bundle or install that runtime.
 
 Run from the repository:
 
