@@ -7,13 +7,14 @@ use sensor_desktop::{
 };
 use sensor_files::TransferId;
 use sensor_identity::{DeviceIdentity, IdentityFileStore};
+use sensor_media::{DecodedFrame, DesktopMessage, Display, Input, MouseButton, VideoFormat};
 use sensor_session::ExpectedPeer;
 use sensor_windows::UserDpapi;
 use std::{
     collections::VecDeque,
     fs::{File, OpenOptions},
     path::PathBuf,
-    sync::mpsc::SyncSender,
+    sync::{mpsc::SyncSender, Arc},
     time::{Duration, Instant},
 };
 
@@ -31,6 +32,7 @@ enum Page {
     Chat,
     Contacts,
     Diagnostics,
+    Remote,
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -136,6 +138,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 progress: None,
                 started: None,
                 verified_audit: None,
+                remote_frame: None,
+                remote_texture: None,
+                remote_displays: Vec::new(),
+                remote_format: None,
+                remote_cursor: None,
+                remote_generation: 0,
+                remote_control: false,
+                remote_buttons: [false; 3],
+                remote_focused: false,
             }))
         }),
     )?;
@@ -175,6 +186,15 @@ struct App {
     progress: Option<(u64, u64)>,
     started: Option<Instant>,
     verified_audit: Option<String>,
+    remote_frame: Option<Arc<DecodedFrame>>,
+    remote_texture: Option<egui::TextureHandle>,
+    remote_displays: Vec<Display>,
+    remote_format: Option<VideoFormat>,
+    remote_cursor: Option<(i32, i32, bool)>,
+    remote_generation: u64,
+    remote_control: bool,
+    remote_buttons: [bool; 3],
+    remote_focused: bool,
 }
 
 fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
@@ -214,11 +234,130 @@ fn primary(ui: &mut egui::Ui, text: &str, enabled: bool) -> bool {
     .clicked()
 }
 
+fn virtual_key(key: egui::Key) -> Option<u16> {
+    use egui::Key;
+    Some(match key {
+        Key::ArrowDown => 0x28,
+        Key::ArrowLeft => 0x25,
+        Key::ArrowRight => 0x27,
+        Key::ArrowUp => 0x26,
+        Key::Escape => 0x1B,
+        Key::Tab => 0x09,
+        Key::Backspace => 0x08,
+        Key::Enter => 0x0D,
+        Key::Space => 0x20,
+        Key::Insert => 0x2D,
+        Key::Delete => 0x2E,
+        Key::Home => 0x24,
+        Key::End => 0x23,
+        Key::PageUp => 0x21,
+        Key::PageDown => 0x22,
+        Key::Colon => 0xBA,
+        Key::Comma => 0xBC,
+        Key::Backslash | Key::Pipe => 0xDC,
+        Key::Slash | Key::Questionmark => 0xBF,
+        Key::Exclamationmark => 0x31,
+        Key::OpenBracket | Key::OpenCurlyBracket => 0xDB,
+        Key::CloseBracket | Key::CloseCurlyBracket => 0xDD,
+        Key::Backtick => 0xC0,
+        Key::Minus => 0xBD,
+        Key::Period => 0xBE,
+        Key::Plus | Key::Equals => 0xBB,
+        Key::Semicolon => 0xBA,
+        Key::Quote => 0xDE,
+        Key::Num0 => 0x30,
+        Key::Num1 => 0x31,
+        Key::Num2 => 0x32,
+        Key::Num3 => 0x33,
+        Key::Num4 => 0x34,
+        Key::Num5 => 0x35,
+        Key::Num6 => 0x36,
+        Key::Num7 => 0x37,
+        Key::Num8 => 0x38,
+        Key::Num9 => 0x39,
+        Key::A => 0x41,
+        Key::B => 0x42,
+        Key::C => 0x43,
+        Key::D => 0x44,
+        Key::E => 0x45,
+        Key::F => 0x46,
+        Key::G => 0x47,
+        Key::H => 0x48,
+        Key::I => 0x49,
+        Key::J => 0x4A,
+        Key::K => 0x4B,
+        Key::L => 0x4C,
+        Key::M => 0x4D,
+        Key::N => 0x4E,
+        Key::O => 0x4F,
+        Key::P => 0x50,
+        Key::Q => 0x51,
+        Key::R => 0x52,
+        Key::S => 0x53,
+        Key::T => 0x54,
+        Key::U => 0x55,
+        Key::V => 0x56,
+        Key::W => 0x57,
+        Key::X => 0x58,
+        Key::Y => 0x59,
+        Key::Z => 0x5A,
+        Key::F1 => 0x70,
+        Key::F2 => 0x71,
+        Key::F3 => 0x72,
+        Key::F4 => 0x73,
+        Key::F5 => 0x74,
+        Key::F6 => 0x75,
+        Key::F7 => 0x76,
+        Key::F8 => 0x77,
+        Key::F9 => 0x78,
+        Key::F10 => 0x79,
+        Key::F11 => 0x7A,
+        Key::F12 => 0x7B,
+        Key::F13 => 0x7C,
+        Key::F14 => 0x7D,
+        Key::F15 => 0x7E,
+        Key::F16 => 0x7F,
+        Key::F17 => 0x80,
+        Key::F18 => 0x81,
+        Key::F19 => 0x82,
+        Key::F20 => 0x83,
+        Key::F21 => 0x84,
+        Key::F22 => 0x85,
+        Key::F23 => 0x86,
+        Key::F24 => 0x87,
+        Key::F25 => 0x88,
+        Key::F26 => 0x89,
+        Key::F27 => 0x8A,
+        Key::F28 => 0x8B,
+        Key::F29 => 0x8C,
+        Key::F30 => 0x8D,
+        Key::F31 => 0x8E,
+        Key::F32 => 0x8F,
+        Key::F33 => 0x90,
+        Key::F34 => 0x91,
+        Key::F35 => 0x92,
+        Key::BrowserBack => 0xA6,
+        Key::Copy | Key::Cut | Key::Paste => return None,
+    })
+}
+
 impl App {
     fn ready(&self) -> bool {
         self.job.is_none() && self.confirmed && peer(&self.peer_id, &self.peer_key).is_ok()
     }
     fn begin(&mut self, task: Task) {
+        self.remote_control = matches!(&task, Task::Remote { control: true, .. });
+        if matches!(&task, Task::Remote { .. }) {
+            self.page = Page::Remote;
+            self.remote_frame = None;
+            self.remote_texture = None;
+            self.remote_displays.clear();
+            self.remote_format = None;
+            self.remote_cursor = None;
+            self.remote_generation = 0;
+            self.remote_buttons = [false; 3];
+            self.remote_focused = false;
+        }
         match peer(&self.peer_id, &self.peer_key) {
             Ok(peer) if self.ready() => {
                 self.notice = None;
@@ -241,6 +380,7 @@ impl App {
         }
     }
     fn stop(&mut self) {
+        self.release_remote_input();
         if let Some(prompt) = self.consent.take() {
             let _ = prompt.reply.try_send(false);
         }
@@ -277,6 +417,10 @@ impl App {
             match event {
                 Event::Status(status) => self.status = status,
                 Event::Consent(peer, mode, reply) => {
+                    if matches!(mode, Mode::ScreenView | Mode::RemoteControl) {
+                        self.page = Page::Remote;
+                        self.remote_control = matches!(mode, Mode::RemoteControl);
+                    }
                     self.consent = Some(ConsentPrompt {
                         peer,
                         mode,
@@ -288,6 +432,14 @@ impl App {
                 Event::Compose(sender) => {
                     self.compose = Some(sender);
                     self.page = Page::Chat;
+                }
+                Event::RemoteDisplays(displays) => self.remote_displays = displays,
+                Event::RemoteFormat(format) => {
+                    self.remote_generation = format.generation;
+                    self.remote_format = Some(format);
+                }
+                Event::RemoteCursor { x, y, visible } => {
+                    self.remote_cursor = Some((x, y, visible));
                 }
                 Event::Progress { id, bytes, total } => {
                     self.progress = Some((bytes, total));
@@ -301,6 +453,12 @@ impl App {
                     self.consent = None;
                     self.compose = None;
                     self.started = None;
+                    self.remote_frame = None;
+                    self.remote_texture = None;
+                    self.remote_format = None;
+                    self.remote_displays.clear();
+                    self.remote_focused = false;
+                    self.remote_buttons = [false; 3];
                     self.status = "Offline • Session closed".into();
                     self.notice = Some(match result {
                         Ok(message) => message,
@@ -316,6 +474,50 @@ impl App {
             self.job = None;
             self.started = None;
             self.status = "Offline • Worker stopped unexpectedly".into();
+        }
+        if let Some(job) = &self.job {
+            if let Some(frame) = job.control.latest_frame() {
+                self.remote_frame = Some(frame);
+            }
+        }
+    }
+
+    fn send_remote(&mut self, event: Input) -> bool {
+        let Some(job) = &self.job else {
+            return false;
+        };
+        let generation = self.remote_generation;
+        if job
+            .control
+            .send_remote(DesktopMessage::Input { generation, event })
+        {
+            true
+        } else {
+            self.notice = Some(
+                "The remote input channel stopped; the session is being closed safely.".into(),
+            );
+            false
+        }
+    }
+    fn release_remote_input(&mut self) {
+        if self.remote_control && self.job.is_some() {
+            let _ = self.send_remote(Input::ReleaseAll);
+        }
+        self.remote_buttons = [false; 3];
+        self.remote_focused = false;
+    }
+    fn select_remote_display(&mut self, index: u32) -> bool {
+        let Some(job) = &self.job else {
+            return false;
+        };
+        if job
+            .control
+            .send_remote(DesktopMessage::SelectDisplay(index))
+        {
+            true
+        } else {
+            self.notice = Some("The remote monitor-selection channel is unavailable.".into());
+            false
         }
     }
     fn peer_form(&mut self, ui: &mut egui::Ui) {
@@ -384,6 +586,35 @@ impl App {
                         }
                     }
                 }
+                if primary(&mut columns[0], "View remote desktop", self.ready()) {
+                    match self.address.parse() {
+                        Ok(address) => self.begin(Task::Remote {
+                            address,
+                            control: false,
+                        }),
+                        Err(_) => {
+                            self.notice = Some("Use a valid remote IP address and port.".into())
+                        }
+                    }
+                }
+                if columns[0]
+                    .add_enabled(
+                        self.ready(),
+                        egui::Button::new("Control remote desktop")
+                            .min_size(Vec2::new(170.0, 42.0)),
+                    )
+                    .clicked()
+                {
+                    match self.address.parse() {
+                        Ok(address) => self.begin(Task::Remote {
+                            address,
+                            control: true,
+                        }),
+                        Err(_) => {
+                            self.notice = Some("Use a valid remote IP address and port.".into())
+                        }
+                    }
+                }
                 columns[1].label(RichText::new("Receive a connection").strong());
                 field(
                     &mut columns[1],
@@ -403,7 +634,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new("127.0.0.1 is this PC only. For another PC, explicitly choose your LAN address. No firewall rule or background service is installed.").size(12.0).color(MUTED));
+            ui.label(RichText::new("Remote desktop is attended: the other Windows user must approve View or Control. 127.0.0.1 is this PC only; choose a reachable LAN address for another PC.").size(12.0).color(MUTED));
         });
     }
     fn files(&mut self, ui: &mut egui::Ui) {
@@ -542,6 +773,211 @@ impl App {
                 );
             });
         });
+    }
+    fn remote(&mut self, ui: &mut egui::Ui) {
+        let mode_label = if self.remote_control {
+            "control enabled"
+        } else {
+            "view only"
+        };
+        title(
+            ui,
+            "REMOTE DESKTOP",
+            "See the other Windows screen.",
+            "Attended H.264 video with explicit local consent.",
+        );
+        ui.label(
+            RichText::new(format!("Permission profile: {mode_label}"))
+                .strong()
+                .color(TEAL),
+        );
+        if !self.remote_displays.is_empty() {
+            let current = self
+                .remote_format
+                .as_ref()
+                .map(|format| format.display.index)
+                .unwrap_or(self.remote_displays[0].index);
+            let mut selected = current;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("REMOTE MONITOR").size(12.0).strong());
+                egui::ComboBox::from_id_salt("remote-monitor")
+                    .selected_text(
+                        self.remote_displays
+                            .iter()
+                            .find(|display| display.index == selected)
+                            .map(|display| display.name.clone())
+                            .unwrap_or_else(|| "Select monitor".into()),
+                    )
+                    .show_ui(ui, |ui| {
+                        for display in &self.remote_displays {
+                            ui.selectable_value(&mut selected, display.index, &display.name);
+                        }
+                    });
+            });
+            if selected != current {
+                self.select_remote_display(selected);
+            }
+        }
+        card(ui, |ui| {
+            let format = self.remote_format.clone();
+            if let Some(format) = &format {
+                ui.label(format!(
+                    "{} • {}×{} stream • {} fps limit • {} • {}",
+                    format.display.name,
+                    format.width,
+                    format.height,
+                    format.fps_limit,
+                    format.encoder,
+                    if format.hardware {
+                        "hardware MFT"
+                    } else {
+                        "software MFT"
+                    }
+                ));
+            } else {
+                ui.label(RichText::new("Waiting for the remote display format…").color(MUTED));
+            }
+            let Some(frame) = self.remote_frame.clone() else {
+                ui.add_space(18.0);
+                ui.label(RichText::new("No video frame received yet.").color(MUTED));
+                return;
+            };
+            let dimensions = [frame.width as usize, frame.height as usize];
+            let image = egui::ColorImage::from_rgba_unmultiplied(dimensions, &frame.rgba);
+            if let Some(texture) = &mut self.remote_texture {
+                texture.set(image, egui::TextureOptions::LINEAR);
+            } else {
+                self.remote_texture = Some(ui.ctx().load_texture(
+                    "SENSOR remote desktop",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            let available = ui.available_size();
+            let aspect = frame.width as f32 / frame.height as f32;
+            let width = available.x.max(120.0);
+            let height = (width / aspect).min(available.y.max(160.0));
+            let size = Vec2::new(width.min(height * aspect), height);
+            let response = ui.add(
+                egui::Image::new((
+                    self.remote_texture.as_ref().expect("texture created").id(),
+                    size,
+                ))
+                .fit_to_exact_size(size)
+                .sense(egui::Sense::click_and_drag()),
+            );
+            if response.clicked() {
+                response.request_focus();
+            }
+            let display = format
+                .as_ref()
+                .map(|format| format.display.clone())
+                .unwrap_or(Display {
+                    index: 0,
+                    name: "remote".into(),
+                    left: 0,
+                    top: 0,
+                    width: frame.width,
+                    height: frame.height,
+                });
+            let hovered = response.hovered();
+            if self.remote_control {
+                if let Some(pos) = response.hover_pos() {
+                    let x = ((pos.x - response.rect.left()) / response.rect.width()
+                        * display.width as f32)
+                        .floor()
+                        .clamp(0.0, display.width.saturating_sub(1) as f32)
+                        as u32;
+                    let y = ((pos.y - response.rect.top()) / response.rect.height()
+                        * display.height as f32)
+                        .floor()
+                        .clamp(0.0, display.height.saturating_sub(1) as f32)
+                        as u32;
+                    if hovered {
+                        self.send_remote(Input::Move { x, y });
+                    }
+                }
+                let pointer = ui.ctx().input(|input| {
+                    [
+                        input.pointer.primary_down(),
+                        input.pointer.secondary_down(),
+                        input.pointer.middle_down(),
+                    ]
+                });
+                for (index, down) in pointer.into_iter().enumerate() {
+                    let allowed = hovered || self.remote_buttons[index];
+                    if allowed && down != self.remote_buttons[index] {
+                        let button = match index {
+                            0 => MouseButton::Left,
+                            1 => MouseButton::Right,
+                            _ => MouseButton::Middle,
+                        };
+                        if self.send_remote(Input::Button { button, down }) {
+                            self.remote_buttons[index] = down;
+                        }
+                    }
+                }
+                let scroll = ui.ctx().input(|input| input.smooth_scroll_delta);
+                if hovered && (scroll.x != 0.0 || scroll.y != 0.0) {
+                    if scroll.y != 0.0 {
+                        self.send_remote(Input::Wheel {
+                            delta: (scroll.y * 120.0).round().clamp(-12_000.0, 12_000.0) as i32,
+                            horizontal: false,
+                        });
+                    }
+                    if scroll.x != 0.0 {
+                        self.send_remote(Input::Wheel {
+                            delta: (scroll.x * 120.0).round().clamp(-12_000.0, 12_000.0) as i32,
+                            horizontal: true,
+                        });
+                    }
+                }
+                let focused = response.has_focus();
+                if focused {
+                    let events = ui.ctx().input(|input| input.events.clone());
+                    for event in events {
+                        match event {
+                            egui::Event::Text(text) if !text.is_empty() => {
+                                self.send_remote(Input::Text(text));
+                            }
+                            egui::Event::Key {
+                                key,
+                                pressed,
+                                repeat,
+                                ..
+                            } if !repeat || !pressed => {
+                                if let Some(key) = virtual_key(key) {
+                                    self.send_remote(Input::Key {
+                                        virtual_key: key,
+                                        down: pressed,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                if self.remote_focused && !focused {
+                    let _ = self.send_remote(Input::ReleaseAll);
+                    self.remote_buttons = [false; 3];
+                }
+                self.remote_focused = focused;
+            }
+            if let Some((x, y, visible)) = self.remote_cursor {
+                ui.label(format!(
+                    "Remote cursor: {} ({x}, {y})",
+                    if visible { "visible" } else { "hidden" }
+                ));
+            }
+        });
+        if !self.remote_control {
+            ui.label(
+                RichText::new("View-only session: no keyboard or mouse input is sent.")
+                    .color(MUTED),
+            );
+        } else {
+            ui.label(RichText::new("Click the remote screen to focus it. Leaving the viewport releases held keys and buttons.").color(MUTED));
+        }
     }
     fn contacts(&mut self, ui: &mut egui::Ui) {
         title(ui, "TRUSTED DEVICES", "Keep your contacts close.", "A local address book. No cloud account, discovery service, or silent trust enrollment.");
@@ -735,6 +1171,7 @@ impl eframe::App for App {
                 ui.add_space(28.0);
                 for (page, label) in [
                     (Page::Connect, "Connect"),
+                    (Page::Remote, "Remote desktop"),
                     (Page::Files, "File transfer"),
                     (Page::Chat, "Session chat"),
                     (Page::Contacts, "Trusted devices"),
@@ -758,6 +1195,9 @@ impl eframe::App for App {
                         )
                         .clicked()
                     {
+                        if self.page == Page::Remote && page != Page::Remote {
+                            self.release_remote_input();
+                        }
                         self.page = page;
                     }
                 }
@@ -811,6 +1251,7 @@ impl eframe::App for App {
                     .show(ui, |ui| {
                         ui.add_enabled_ui(self.consent.is_none(), |ui| match self.page {
                             Page::Connect => self.connect(ui),
+                            Page::Remote => self.remote(ui),
                             Page::Files => self.files(ui),
                             Page::Chat => self.chat(ui),
                             Page::Contacts => self.contacts(ui),
@@ -835,7 +1276,12 @@ impl eframe::App for App {
                 title(ui, "INCOMING REQUEST", "Allow this connection?", "Only grant access if you recognize this person and expect this request.");
                 ui.label(RichText::new(format!("Device {}", prompt.peer.device_id)).size(24.0).strong());
                 ui.label(format!("Verified key: {}", hex(&prompt.peer.public_key)));
-                ui.label(match prompt.mode { Mode::Chat => "Requested access: text chat only. No screen, input, or file access.", Mode::FileTransfer => "Requested access: write transferred files to the selected receive folder. No screen or keyboard/mouse access." });
+                ui.label(match prompt.mode {
+                    Mode::Chat => "Requested access: text chat only. No screen, input, or file access.",
+                    Mode::FileTransfer => "Requested access: write transferred files to the selected receive folder. No screen or keyboard/mouse access.",
+                    Mode::ScreenView => "Requested access: view this desktop and show the remote pointer. No keyboard or mouse control.",
+                    Mode::RemoteControl => "Requested access: view this desktop and control keyboard/mouse through attended input injection.",
+                });
                 if matches!(prompt.mode, Mode::FileTransfer) { ui.label(format!("Receive folder: {}", self.receive.display())); }
                 ui.label(format!("Request expires in {} seconds", 120_u64.saturating_sub(prompt.opened.elapsed().as_secs())));
                 ui.horizontal(|ui| {

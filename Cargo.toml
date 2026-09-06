@@ -12,11 +12,12 @@ members = [
     "crates/sensor-audit",
     "crates/sensor-relay",
     "crates/sensor-desktop",
+    "crates/sensor-media",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.98"
 license = "LicenseRef-SENSOR-Proprietary"

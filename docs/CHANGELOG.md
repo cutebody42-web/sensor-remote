@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0 - 2026-09-06 (Windows attended remote-desktop development build)
+
+- Added attended remote desktop sessions in the native Windows app.
+- Added DXGI Desktop Duplication capture on the ordinary interactive desktop.
+- Added real Windows Media Foundation H.264 encode/decode and bounded encrypted
+  frame fragments; no JPEG screenshot streaming.
+- Added native wgpu viewport, monitor enumeration/selection, remote cursor
+  metadata, and consent/focus/permission-checked SendInput control.
+- Added full-duplex encrypted transport for simultaneous video and input.
+- Added strict media/input validation and authenticated full-duplex transport
+  regression tests.
+- Final unlocked two-device visual/input verification, unattended access,
+  relay selection/NAT traversal, printing and enterprise release remain.
+
 ## 0.2.0 - 2026-09-06 (Windows development build)
 
 - Added native egui/wgpu Direct3D 12 Windows application and original owner-supplied logo.
@@ -12,7 +26,7 @@
 - Added encrypted turn-based chat, local verified contacts, alias and diagnostics.
 - Added signed hash-chain incoming-session audit and authenticated pair relay library.
 - Added actual socket/DPAPI/worker integration and malformed-protocol regression tests.
-- Full remote desktop, unattended service, printing and enterprise release remain missing.
+- Unattended service, printing and enterprise release remained missing.
 
 ## 0.1.0 - 2026-09-06
 

@@ -40,7 +40,8 @@ requires the exact next sequence: duplicate, skipped and reordered records fail.
 Malformed, tampered or I/O-failed connections are poisoned and closed.
 
 A confirmed channel is authenticated, **not yet authorized**. The first operation
-requests Chat or FileTransfer. Local acceptance grants exactly that mode.
+requests Chat, FileTransfer, ScreenView or RemoteControl. Local acceptance
+grants exactly that mode.
 Every operation requires its relevant permission at the receiving endpoint.
 Rejection or missing UI response grants nothing.
 
@@ -48,6 +49,13 @@ FileOffer/Resume, Ready, Chunk/Progress, Commit/Complete, Pause and Cancel are
 typed operations. 64 KiB chunks and the complete manifest are SHA-256 checked.
 A transfer owner is the authenticated peer key. The desktop UI exposes
 reconnect/resume; Pause/Cancel are protocol operations, not GUI buttons yet.
+
+Remote desktop messages carry validated display metadata, a negotiated H.264
+format, bounded 128 KiB compressed-frame fragments, cursor metadata, monitor
+selection, ping/pong and permission-checked input. Video and input use one
+authenticated full-duplex channel: the reader and writer share record state
+only while sealing/opening, never while doing socket I/O. A single incomplete
+compressed frame is retained and discarded on any sequence or metadata error.
 
 This custom composition has tests but has not received an independent protocol
 security review. Do not equate it with a reviewed TLS or Noise implementation.

@@ -26,12 +26,22 @@ pub const DEFAULT_RECEIVE_LIMIT: u64 = 1024 * 1024 * 1024;
 pub enum Mode {
     Chat,
     FileTransfer,
+    ScreenView,
+    RemoteControl,
 }
 impl Mode {
     pub fn permissions(self) -> Permissions {
         match self {
             Self::Chat => Permissions::of(&[Permission::Chat]),
             Self::FileTransfer => Permissions::file_transfer(),
+            Self::ScreenView => {
+                Permissions::of(&[Permission::ViewDesktop, Permission::RemotePointer])
+            }
+            Self::RemoteControl => Permissions::of(&[
+                Permission::ViewDesktop,
+                Permission::RemotePointer,
+                Permission::Input,
+            ]),
         }
     }
 }
@@ -63,6 +73,7 @@ pub enum Message {
     Cancel,
     Cancelled,
     Close,
+    Desktop(sensor_media::DesktopMessage),
 }
 
 #[derive(Debug, Error)]
@@ -81,6 +92,8 @@ pub enum EndpointError {
     Rejected,
     #[error("unexpected or oversized operation")]
     Invalid,
+    #[error("remote desktop: {0}")]
+    Desktop(String),
 }
 
 /// Implemented by the visible local UI. Returning true is an explicit user action.
@@ -88,6 +101,15 @@ pub trait LocalInteraction {
     fn accept(&mut self, peer: ExpectedPeer, mode: Mode) -> bool;
     fn chat_reply(&mut self, text: &str) -> Option<String>;
     fn transfer_progress(&mut self, _received: u64, _total: u64) {}
+    fn desktop(
+        &mut self,
+        _connection: &mut SecureConnection,
+        _consent: &Consent,
+    ) -> Result<(), EndpointError> {
+        Err(EndpointError::Desktop(
+            "This endpoint does not support desktop sessions".into(),
+        ))
+    }
 }
 
 fn audit(
@@ -152,7 +174,11 @@ pub fn serve(
         0,
     )?;
     connection.send(&Message::Accepted(consent.granted()))?;
-    let result = operate(&mut connection, &consent, local, receiver, log, interaction);
+    let result = if matches!(mode, Mode::ScreenView | Mode::RemoteControl) {
+        interaction.desktop(&mut connection, &consent)
+    } else {
+        operate(&mut connection, &consent, local, receiver, log, interaction)
+    };
     consent.close();
     connection.close();
     audit(

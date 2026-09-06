@@ -17,6 +17,7 @@ sensor-session = { path = "../sensor-session" }
 sensor-transport = { path = "../sensor-transport" }
 sensor-files = { path = "../sensor-files" }
 sensor-audit = { path = "../sensor-audit" }
+sensor-media = { path = "../sensor-media" }
 serde.workspace = true
 sha2.workspace = true
 thiserror.workspace = true

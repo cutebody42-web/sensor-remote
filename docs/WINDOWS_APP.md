@@ -1,8 +1,9 @@
 # Using the native Windows app
 
 SENSOR-Remote.exe is the graphical application. SENSOR-CLI.exe is an optional
-console companion. Neither is a website. This is version 0.2.0 development,
-not the completed remote-desktop product.
+console companion. Neither is a website. This is version 0.3.0 development,
+with attended remote desktop implemented but not the completed AnyDesk-equivalent
+product.
 
 ## First launch
 
@@ -46,6 +47,22 @@ Keep the displayed transfer ID. Restart the receiver's listener, select the same
 source file and enter the ID to resume; another acceptance is required. Do not
 delete partial files if you intend to resume. There is no background retry.
 
+## Attended remote desktop
+
+On the receiver, press Start listening from Connect. On the initiating PC,
+exchange and confirm the receiver's ID/key, then choose View remote desktop or
+Control remote desktop. The receiver must explicitly approve the corresponding
+request. View sends no keyboard or mouse input; Control enables the remote
+viewport's pointer, buttons, wheel, text and key events. Leaving the viewport,
+changing pages or pressing Stop sends ReleaseAll and closes the session safely.
+
+The receiver captures only the ordinary unlocked `Default` interactive desktop.
+The path uses DXGI Desktop Duplication and Windows Media Foundation H.264. It
+does not unlock, switch to or bypass the secure desktop. A changed display mode,
+desktop lock or UIPI/elevation refusal ends the session with an honest error.
+The current build has not yet completed a real two-computer run on this locked
+test machine.
+
 ## Contacts, aliases and audit
 
 Trusted devices saves verified public pins and IP addresses locally. Saving an
@@ -66,7 +83,7 @@ is refused. Nothing starts with Windows, and closing the app stops its work.
 
 ## Not available yet
 
-Remote desktop viewing/control, UAC/login/unattended service, audio, clipboard,
-multi-monitor, printing/Auto Print, recording, VPN, Internet ID lookup, route
-failover, signed installer and signed updates are absent. The relay library is
-tested separately, not exposed by this window. See KNOWN_LIMITATIONS.md.
+UAC/login/unattended service, H.265/AV1, audio, clipboard, printing/Auto Print,
+recording, VPN, Internet ID lookup, NAT/route failover, signed installer and
+signed updates are absent. The relay library is tested separately, not exposed
+by this window. See KNOWN_LIMITATIONS.md.

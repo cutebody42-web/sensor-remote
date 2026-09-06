@@ -2,7 +2,7 @@ param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $repoPath = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 if (-not $OutputDirectory) {
-    $OutputDirectory = Join-Path (Split-Path -Parent $repoPath) 'SENSOR-Windows-0.2.0'
+    $OutputDirectory = Join-Path (Split-Path -Parent $repoPath) 'SENSOR-Windows-0.3.0'
 }
 $packagePath = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $packagePath) {

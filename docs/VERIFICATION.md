@@ -1,4 +1,4 @@
-# Verification evidence — 0.2.0
+# Verification evidence — 0.3.0
 
 Date: 2026-09-06. Local Windows x86_64 MSVC development environment.
 Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
@@ -7,10 +7,10 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 
 | Check | Result |
 | --- | --- |
-| scripts/verify.ps1 -Release -ReleaseTests | PASS |
-| cargo fmt --all -- --check | PASS |
-| cargo test --workspace --release --locked | PASS: 48 tests, zero failed; doc-test targets pass |
-| cargo clippy --workspace --all-targets --locked -- -D warnings | PASS |
+| scripts/verify.ps1 -Release -ReleaseTests | PASS: 55 tests, zero failed; doc-test targets pass |
+| cargo fmt --all -- --check | PASS after 0.3 changes |
+| cargo test --workspace --release --locked | PASS: 55 tests, zero failed; doc-test targets pass |
+| cargo clippy --workspace --all-targets --locked -- -D warnings | PASS after 0.3 changes |
 | cargo build --workspace --release --locked | PASS: graphical and console Windows executables |
 | git diff --check | PASS at verification |
 | Supplied JPEG versus embedded source | Identical SHA-256; automated exact-asset regression |
@@ -19,9 +19,9 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 | Artifact signing/runtime | Unsigned; imports VCRUNTIME140.dll; no bundled runtime installer |
 | Pixel-level/interactive GUI QA | BLOCKED: desktop lock screen; inspection stopped |
 
-The earlier unoptimized workspace suite passed 42 tests before the final six
-regression/binary tests were added. The complete final 48-test suite was run
-in optimized release mode. Do not call the release-mode result a debug run.
+The earlier 0.2.0 unoptimized workspace suite passed 48 tests. The 0.3.0
+changes add remote media, input and full-duplex transport coverage; the current
+release workspace suite is 55 tests with zero failures.
 
 ## Test groups (48 total)
 
@@ -39,6 +39,9 @@ in optimized release mode. Do not call the release-mode result a debug run.
 - Desktop worker/model tests: 4.
 - Desktop worker socket-level accepted/rejected file and bidirectional chat: 3.
 - Actual native graphics backend feature and exact owner-supplied logo: 2.
+- Actual Windows software H.264 encode/decode color-preservation test: 1.
+- Full-duplex encrypted reader/writer transport test: 1.
+- Media fragment/pixel/input validation: 3.
 - Authenticated pair relay round trip and wrong relay key: 2.
 
 Tests use real local TCP sockets and actual Windows DPAPI, with generated
@@ -60,7 +63,8 @@ were performed through the lock screen. Final visual QA needs an unlocked deskto
 
 ## What this does not establish
 
-No complete remote desktop, video/input/codecs, service/UAC, printing, signed
+The remote desktop implementation is present, but no unlocked two-device,
+UIPI/elevated-app, Internet failover, service/UAC, printing, signed
 installer/updater, OS/GPU compatibility matrix, hosted CI, extended fuzzing,
-independent security review, Internet failover, or 8+ hour session evidence.
-The requested full product is not finished or production ready.
+independent security review, or 8+ hour session evidence exists. The complete
+product is not production ready.

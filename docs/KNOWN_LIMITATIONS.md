@@ -1,10 +1,13 @@
-# Known limitations — 0.2.0
+# Known limitations — 0.3.0
 
-This is a functioning native Windows development app, **not a complete remote
-desktop product and not production ready**.
+This is a functioning native Windows attended remote-desktop development app,
+**not a complete AnyDesk-equivalent product and not production ready**.
 
-- No screen capture, remote video, mouse/keyboard injection, multi-monitor,
-  UAC, secure desktop, login-screen support, or Ctrl+Alt+Del.
+- Screen capture, H.264 remote video, attended mouse/keyboard/text injection,
+  monitor enumeration and selection are implemented for the ordinary unlocked
+  interactive desktop. They have not yet completed an unlocked two-device or
+  long-running verification run. H.265/AV1, UAC, secure desktop, login-screen
+  support and Ctrl+Alt+Del are not implemented.
 - No unattended access, Windows service, tray/background persistence,
   reconnect after reboot, audio, remote clipboard, recording or privacy mode.
 - No virtual printer, physical printing pipeline, Auto Print, VPN, tunnels,
@@ -15,7 +18,8 @@ desktop product and not production ready**.
 - The GUI and CLI use direct TCP only. The pair relay is library-only;
   no route selection, direct-first fallback, TLS metadata privacy, QUIC,
   ICE/STUN/TURN, NAT traversal, proxy or regional failover is integrated.
-- A profile permits one active GUI job. Incoming mode is chat or file transfer;
+- A profile permits one active GUI job. Incoming mode is chat, file transfer,
+  view-only desktop or desktop control;
   no mixed-operation, multi-session or dual-pane file manager.
 - Chat is turn-based with a 120-second reply/idle deadline and 200-message
   in-memory display cap. Chat history is not persisted or uploaded.

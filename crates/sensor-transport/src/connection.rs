@@ -13,6 +13,10 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::{
     io::{self, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -114,7 +118,9 @@ fn write_frame(
 /// until both peers have checked the encrypted handshake confirmation.
 pub struct SecureConnection {
     stream: TcpStream,
-    session: SecureSession,
+    session: Option<SecureSession>,
+    peer: ExpectedPeer,
+    transcript: [u8; 32],
     timeout: Duration,
     closed: bool,
 }
@@ -166,7 +172,12 @@ impl SecureConnection {
         let session = finish_initiator(pending, response.decode_payload()?)?;
         let mut connection = Self {
             stream,
-            session,
+            peer: ExpectedPeer {
+                device_id: session.peer_device_id(),
+                public_key: session.peer_identity_key(),
+            },
+            transcript: session.transcript_hash(),
+            session: Some(session),
             timeout,
             closed: false,
         };
@@ -200,7 +211,12 @@ impl SecureConnection {
         let session = finish_responder(pending)?;
         let mut connection = Self {
             stream,
-            session,
+            peer: ExpectedPeer {
+                device_id: session.peer_device_id(),
+                public_key: session.peer_identity_key(),
+            },
+            transcript: session.transcript_hash(),
+            session: Some(session),
             timeout,
             closed: false,
         };
@@ -212,14 +228,11 @@ impl SecureConnection {
     }
 
     pub fn peer(&self) -> ExpectedPeer {
-        ExpectedPeer {
-            device_id: self.session.peer_device_id(),
-            public_key: self.session.peer_identity_key(),
-        }
+        self.peer
     }
 
     pub fn transcript_hash(&self) -> [u8; 32] {
-        self.session.transcript_hash()
+        self.transcript
     }
 
     /// Deadline for each subsequent record, including local attended interaction.
@@ -260,7 +273,11 @@ impl SecureConnection {
             return Err(ProtocolError::FrameTooLarge.into());
         }
         let result = (|| {
-            let record = self.session.seal(AAD, plaintext)?;
+            let record = self
+                .session
+                .as_mut()
+                .ok_or(ConnectionError::Closed)?
+                .seal(AAD, plaintext)?;
             let mut payload = record.sequence.to_be_bytes().to_vec();
             payload.extend_from_slice(&record.ciphertext);
             write_frame(
@@ -293,7 +310,7 @@ impl SecureConnection {
                     .try_into()
                     .map_err(|_| ConnectionError::UnexpectedMessage)?,
             );
-            Ok(self.session.open(
+            Ok(self.session.as_mut().ok_or(ConnectionError::Closed)?.open(
                 &EncryptedRecord {
                     sequence,
                     ciphertext: frame.payload[8..].to_vec(),
@@ -308,8 +325,141 @@ impl SecureConnection {
     }
 
     pub fn close(&mut self) {
+        if self.closed {
+            return;
+        }
         self.closed = true;
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+
+    /// Transfers the authenticated record state to exactly one reader and writer.
+    /// The crypto lock is never held during socket I/O. Dropping either half aborts both.
+    pub fn split(&mut self) -> Result<(SecureReader, SecureWriter), ConnectionError> {
+        if self.closed {
+            return Err(ConnectionError::Closed);
+        }
+        let read = self.stream.try_clone()?;
+        let write = self.stream.try_clone()?;
+        let state = Arc::new(DuplexState {
+            session: Mutex::new(self.session.take().ok_or(ConnectionError::Closed)?),
+            failed: AtomicBool::new(false),
+        });
+        self.closed = true;
+        Ok((
+            SecureReader {
+                stream: read,
+                state: state.clone(),
+                timeout: self.timeout,
+            },
+            SecureWriter {
+                stream: write,
+                state,
+                timeout: self.timeout,
+            },
+        ))
+    }
+}
+
+struct DuplexState {
+    session: Mutex<SecureSession>,
+    failed: AtomicBool,
+}
+pub struct SecureReader {
+    stream: TcpStream,
+    state: Arc<DuplexState>,
+    timeout: Duration,
+}
+pub struct SecureWriter {
+    stream: TcpStream,
+    state: Arc<DuplexState>,
+    timeout: Duration,
+}
+fn fail_duplex(state: &DuplexState, stream: &TcpStream) {
+    state.failed.store(true, Ordering::SeqCst);
+    let _ = stream.shutdown(Shutdown::Both);
+}
+impl SecureReader {
+    pub fn receive<T: DeserializeOwned>(&mut self) -> Result<T, ConnectionError> {
+        let result = (|| {
+            if self.state.failed.load(Ordering::SeqCst) {
+                return Err(ConnectionError::Closed);
+            }
+            let frame = read_frame(
+                &mut self.stream,
+                MAX_FRAME_SIZE,
+                Instant::now() + self.timeout,
+            )?;
+            if frame.message_type != MessageType::Control || frame.payload.len() < 24 {
+                return Err(ConnectionError::UnexpectedMessage);
+            }
+            let record = EncryptedRecord {
+                sequence: u64::from_be_bytes(
+                    frame.payload[..8]
+                        .try_into()
+                        .map_err(|_| ConnectionError::UnexpectedMessage)?,
+                ),
+                ciphertext: frame.payload[8..].to_vec(),
+            };
+            let plaintext = self
+                .state
+                .session
+                .lock()
+                .map_err(|_| ConnectionError::Closed)?
+                .open(&record, AAD)?;
+            let frame = Frame::decode(&plaintext)?;
+            if frame.message_type != MessageType::Control {
+                return Err(ConnectionError::UnexpectedMessage);
+            }
+            Ok(frame.decode_payload()?)
+        })();
+        if result.is_err() {
+            fail_duplex(&self.state, &self.stream);
+        }
+        result
+    }
+}
+impl SecureWriter {
+    pub fn send<T: Serialize>(&mut self, message: &T) -> Result<(), ConnectionError> {
+        let result = (|| {
+            if self.state.failed.load(Ordering::SeqCst) {
+                return Err(ConnectionError::Closed);
+            }
+            let plaintext = Frame::new(MessageType::Control, message)?.encode()?;
+            if plaintext.len() > MAX_FRAME_SIZE - 64 {
+                return Err(ProtocolError::FrameTooLarge.into());
+            }
+            let record = self
+                .state
+                .session
+                .lock()
+                .map_err(|_| ConnectionError::Closed)?
+                .seal(AAD, &plaintext)?;
+            let mut payload = record.sequence.to_be_bytes().to_vec();
+            payload.extend_from_slice(&record.ciphertext);
+            write_frame(
+                &mut self.stream,
+                &Frame {
+                    version: PROTOCOL_VERSION,
+                    message_type: MessageType::Control,
+                    payload,
+                },
+                Instant::now() + self.timeout,
+            )
+        })();
+        if result.is_err() {
+            fail_duplex(&self.state, &self.stream);
+        }
+        result
+    }
+}
+impl Drop for SecureReader {
+    fn drop(&mut self) {
+        fail_duplex(&self.state, &self.stream);
+    }
+}
+impl Drop for SecureWriter {
+    fn drop(&mut self) {
+        fail_duplex(&self.state, &self.stream);
     }
 }
 
@@ -402,5 +552,31 @@ mod tests {
         let mut stream = TcpStream::connect(address).unwrap();
         stream.write_all(&u32::MAX.to_be_bytes()).unwrap();
         assert!(host.join().unwrap());
+    }
+
+    #[test]
+    fn split_reader_and_writer_keep_the_authenticated_stream_full_duplex() {
+        let local = DeviceIdentity::generate();
+        let remote = DeviceIdentity::generate();
+        let local_pin = expected(&local);
+        let remote_pin = expected(&remote);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap().0;
+            let mut connection =
+                SecureConnection::accept(stream, &remote, local_pin, DEFAULT_TIMEOUT).unwrap();
+            let (mut reader, mut writer) = connection.split().unwrap();
+            let received: String = reader.receive().unwrap();
+            assert_eq!(received, "client-to-host");
+            writer.send(&"host-to-client").unwrap();
+        });
+        let mut connection =
+            SecureConnection::connect(address, &local, remote_pin, DEFAULT_TIMEOUT).unwrap();
+        let (mut reader, mut writer) = connection.split().unwrap();
+        writer.send(&"client-to-host").unwrap();
+        let received: String = reader.receive().unwrap();
+        assert_eq!(received, "host-to-client");
+        host.join().unwrap();
     }
 }
