@@ -147,6 +147,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 remote_control: false,
                 remote_buttons: [false; 3],
                 remote_focused: false,
+                remote_modifiers: [false; 3],
             }))
         }),
     )?;
@@ -195,6 +196,7 @@ struct App {
     remote_control: bool,
     remote_buttons: [bool; 3],
     remote_focused: bool,
+    remote_modifiers: [bool; 3],
 }
 
 fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
@@ -357,6 +359,7 @@ impl App {
             self.remote_generation = 0;
             self.remote_buttons = [false; 3];
             self.remote_focused = false;
+            self.remote_modifiers = [false; 3];
         }
         match peer(&self.peer_id, &self.peer_key) {
             Ok(peer) if self.ready() => {
@@ -459,6 +462,7 @@ impl App {
                     self.remote_displays.clear();
                     self.remote_focused = false;
                     self.remote_buttons = [false; 3];
+                    self.remote_modifiers = [false; 3];
                     self.status = "Offline • Session closed".into();
                     self.notice = Some(match result {
                         Ok(message) => message,
@@ -505,6 +509,7 @@ impl App {
         }
         self.remote_buttons = [false; 3];
         self.remote_focused = false;
+        self.remote_modifiers = [false; 3];
     }
     fn select_remote_display(&mut self, index: u32) -> bool {
         let Some(job) = &self.job else {
@@ -917,6 +922,24 @@ impl App {
                         }
                     }
                 }
+                let focused = response.has_focus();
+                if focused {
+                    let modifiers = ui.ctx().input(|input| {
+                        [
+                            input.modifiers.ctrl,
+                            input.modifiers.alt,
+                            input.modifiers.shift,
+                        ]
+                    });
+                    for (index, down) in modifiers.into_iter().enumerate() {
+                        if down != self.remote_modifiers[index] {
+                            let virtual_key = [0x11, 0x12, 0x10][index];
+                            if self.send_remote(Input::Key { virtual_key, down }) {
+                                self.remote_modifiers[index] = down;
+                            }
+                        }
+                    }
+                }
                 let scroll = ui.ctx().input(|input| input.smooth_scroll_delta);
                 if hovered && (scroll.x != 0.0 || scroll.y != 0.0) {
                     if scroll.y != 0.0 {
@@ -932,7 +955,6 @@ impl App {
                         });
                     }
                 }
-                let focused = response.has_focus();
                 if focused {
                     let events = ui.ctx().input(|input| input.events.clone());
                     for event in events {
@@ -944,13 +966,24 @@ impl App {
                                 key,
                                 pressed,
                                 repeat,
+                                modifiers,
                                 ..
                             } if !repeat || !pressed => {
                                 if let Some(key) = virtual_key(key) {
-                                    self.send_remote(Input::Key {
-                                        virtual_key: key,
-                                        down: pressed,
-                                    });
+                                    let text_key = (0x30..=0x5A).contains(&key)
+                                        || key == 0x20
+                                        || (0xBA..=0xE2).contains(&key);
+                                    if !text_key
+                                        || modifiers.ctrl
+                                        || modifiers.alt
+                                        || modifiers.command
+                                        || modifiers.mac_cmd
+                                    {
+                                        self.send_remote(Input::Key {
+                                            virtual_key: key,
+                                            down: pressed,
+                                        });
+                                    }
                                 }
                             }
                             _ => {}
@@ -960,6 +993,7 @@ impl App {
                 if self.remote_focused && !focused {
                     let _ = self.send_remote(Input::ReleaseAll);
                     self.remote_buttons = [false; 3];
+                    self.remote_modifiers = [false; 3];
                 }
                 self.remote_focused = focused;
             }
