@@ -180,6 +180,11 @@ fn open(
     timeout: Duration,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<RenderWebSocket, RenderError> {
+    // Tungstenite deliberately leaves Rustls' process-level crypto provider
+    // choice to the application. SENSOR ships with ring enabled so the
+    // native Windows client and the deployed-WSS integration test behave the
+    // same way regardless of which other Rustls users are in the process.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let url = websocket_url(server)?;
     let uri: tungstenite::http::Uri = url
         .parse()
