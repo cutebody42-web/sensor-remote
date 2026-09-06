@@ -1,7 +1,7 @@
 /target/
+/work/
 *.log
 *.dmp
 .env
 .env.*
 !.env.example
-
