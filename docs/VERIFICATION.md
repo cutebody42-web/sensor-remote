@@ -1,5 +1,18 @@
 # Verification evidence — 0.3.0
 
+## Latest Internet deployment attempt — 2026-09-06
+
+- Private repository created and source pushed: https://github.com/cutebody42-web/sensor-remote (commit `b5542d7`).
+- `cargo test --workspace --release --locked`: **62 passed, 0 failed, 1 ignored**; doc-tests passed. The ignored test requires a real deployed HTTPS URL.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- Added local integration evidence for delayed registration, server-challenge replay rejection, signed listener-role binding, invalid token rejection, concurrent listener/outgoing registration, cancellation, authenticated encrypted chat, a 1,048,737-byte file with SHA-256 verification, and denied file access.
+- Fixed Internet registration timeouts, listener replacement, reconnect/cancellation, UI connection-state reporting, saved server configuration, bounded WebSocket messages/connections, and relay write backpressure. Render capture profile is now at most 1280x720, 15 FPS, 1.5 Mbit/s; aggregate relay cap is 2 Mbit/s by default.
+- Render configured for Docker, Free ($0/month), Frankfurt, `main`, `deployment/render/Dockerfile`, root build context, and `/health`.
+- **Deployment blocked:** Render displayed its Add Card verification modal on both deployment attempts while Free was visibly selected. No card was entered, no paid compute selected, and no live public URL was created or verified. The prepared form was left open for the account owner.
+- Therefore public WSS, two physical devices on different networks, and production availability remain **unverified**. The laptop is not running a public server. Do not interpret the passing local tests as an Internet deployment or AnyDesk parity.
+
+The following sections retain earlier verification evidence; their counts and deployment status are superseded by the latest section above.
+
 Date: 2026-09-06. Local Windows x86_64 MSVC development environment.
 Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 
@@ -11,7 +24,7 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 | cargo fmt --all -- --check | PASS after 0.3 changes |
 | cargo build --workspace --release --locked | PASS: graphical, console, relay and rendezvous binaries |
 | cargo clippy --workspace --all-targets --locked -- -D warnings | PASS after 0.3 changes |
-| Render rendezvous integration | PASS: two native clients exchanged opaque bytes through the WSS profile |
+| Render rendezvous integration (earlier) | PASS: two native clients exchanged opaque bytes through a local plain-WS relay; not public WSS |
 | git diff --check | PASS at verification |
 | Supplied JPEG versus embedded source | Identical SHA-256; automated exact-asset regression |
 | Native GUI launch | Window and real accessibility controls observed |

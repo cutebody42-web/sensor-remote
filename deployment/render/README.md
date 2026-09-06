@@ -37,8 +37,15 @@ Windows user's DPAPI-protected profile.
 6. Verify the URL returns JSON from `/health`, launch both apps, and use the
    displayed device IDs plus verified public keys for the first connection.
 
-The Windows app automatically keeps a Render listener registered when both
-`SENSOR_MODE=RENDER_TEST` and `SENSOR_SERVER` are configured. Incoming access
+The Windows app also reads `sensor-network.json` from its profile, then beside
+the executable, with the shape `{"server":"https://YOUR-SERVICE.onrender.com"}`.
+An explicit `SENSOR_SERVER`/`SENSOR_WS` environment setting takes precedence.
+Starting the Internet listener saves the editable URL in the profile. A saved
+server selects the Internet route on later double-click launches unless
+`SENSOR_MODE` explicitly selects another mode. Do not ship an unverified URL.
+
+The Windows app keeps a Render listener registered when Internet mode is
+configured. Incoming access
 still opens the normal visible SENSOR consent prompt. Closing the app stops
 the listener; it is not an unattended Windows service.
 
@@ -61,15 +68,25 @@ later production service design.
 | --- | --- | --- |
 | `PORT` | Render service | Supplied by Render; the server defaults to `10000` locally. |
 | `SENSOR_MODE` | Windows app / Blueprint | `RENDER_TEST` enables the temporary cloud path. |
-| `SENSOR_SERVER` | Windows app | HTTPS/HTTP/WSS/WS base URL for the service. |
+| `SENSOR_SERVER` | Windows app | HTTPS/WSS base URL; HTTP/WS is allowed only for loopback tests. |
 | `SENSOR_WS` | Windows app | Optional WSS fallback when `SENSOR_SERVER` is absent. |
-| `RELAY_MAX_BITRATE` | Render service | Aggregate relay cap in bytes per second. |
+| `RELAY_MAX_BITRATE` | Render service | Aggregate relay cap in bits per second; default 2000000. |
 | `RELAY_MAX_FPS` | Render service health metadata | Target capture policy for a future server-enforced media profile. |
 | `RELAY_MAX_RESOLUTION` | Render service health metadata | Target resolution policy for a future server-enforced media profile. |
 
-The current service cannot inspect end-to-end encrypted screen frames, so FPS
-and resolution are advertised policy values; capture enforcement remains in a
-future media/profile layer. The byte cap is enforced by the relay.
+The service cannot inspect end-to-end encrypted screen frames, so FPS and
+resolution are advertised policy values. The Windows Render route independently
+limits capture to 1280x720, 15 FPS, and 1.5 Mbit/s H.264. The aggregate bitrate
+cap is enforced by the relay. Server environment changes do not reconfigure
+the client encoder dynamically.
+
+Registration v2 signs a server-generated one-use challenge and the connection
+role. Outgoing connections do not replace the same device's listener. Tokens
+are bound to their socket; unauthenticated binary traffic and empty heartbeat
+tokens are rejected. Control messages are bounded to 16 KiB, relay frames to
+1 MiB, queued pairing offers to one, and concurrent accepted connections to 64.
+These safeguards do not replace an independent security review or production
+account/rate-limit infrastructure.
 
 ## Local smoke test
 

@@ -37,7 +37,7 @@ fn server() -> (Child, String) {
 }
 
 #[test]
-fn two_render_clients_exchange_opaque_bytes_over_wss_profile() {
+fn two_render_clients_exchange_opaque_bytes_over_local_websocket() {
     let (mut process, server) = server();
     let host = DeviceIdentity::generate();
     let client = DeviceIdentity::generate();
