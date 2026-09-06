@@ -121,7 +121,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 peer_id: String::new(),
                 peer_key: String::new(),
                 address: "127.0.0.1:5909".into(),
-                bind: "127.0.0.1:5909".into(),
+                bind: "0.0.0.0:5909".into(),
                 use_relay: false,
                 relay_address: "127.0.0.1:5910".into(),
                 relay_key: String::new(),

@@ -20,8 +20,9 @@ runtime is needed. Window rendering uses native egui/wgpu Direct3D 12.
 
 1. Exchange both device IDs and public keys. On each PC enter the other peer's
    ID/key and confirm that you compared it.
-2. On the receiving PC, choose its local LAN IP and a port (for example 5909),
-   then press Start listening. The default 127.0.0.1 only accepts this PC.
+2. On the receiving PC, leave the default `0.0.0.0:5909` to listen on its
+   network interfaces (or choose a specific local address), then press Start
+   listening. `127.0.0.1` accepts connections from this PC only.
 3. On the initiating PC enter the receiver's IP:port and Start encrypted chat.
 4. The receiver sees the authenticated ID/key and requested mode. Accept or
    Reject explicitly. No unattended grant exists.
