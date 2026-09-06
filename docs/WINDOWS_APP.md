@@ -2,8 +2,8 @@
 
 SENSOR-Remote.exe is the graphical application. SENSOR-CLI.exe is an optional
 console companion. Neither is a website. This is version 0.3.0 development,
-with attended remote desktop implemented but not the completed AnyDesk-equivalent
-product.
+with attended remote desktop and an explicitly provisioned relay path
+implemented, but not the completed commercial-equivalent product.
 
 ## First launch
 
@@ -27,6 +27,12 @@ runtime is needed. Window rendering uses native egui/wgpu Direct3D 12.
    Reject explicitly. No unattended grant exists.
 5. Chat is turn-based in this build: send, receive a reply, then send again.
    Reply/idle timeout is 120 seconds. Stop/disconnect closes the socket.
+
+For a connection across networks, run `sensor-relay.exe` on a server and
+provision both endpoint public keys. Select **Provisioned relay** on both SENSOR
+windows and enter the relay address and relay public key. The relay forwards
+endpoint-encrypted bytes; it does not replace endpoint authentication. See
+[RELAY.md](RELAY.md).
 
 No firewall configuration is automatic. Network/firewall setup for an actual
 second PC is the device owner's responsibility. Internet NAT traversal is absent.
@@ -63,6 +69,12 @@ desktop lock or UIPI/elevation refusal ends the session with an honest error.
 The current build has not yet completed a real two-computer run on this locked
 test machine.
 
+If the receiver explicitly checks **Auto-accept this pinned peer while SENSOR
+is open**, the verified peer can start an approved mode without an interactive
+consent dialog. This is an attended-user process setting only: it is not a
+Windows service, does not survive closing the app, and does not provide login
+screen or UAC control.
+
 ## Contacts, aliases and audit
 
 Trusted devices saves verified public pins and IP addresses locally. Saving an
@@ -83,7 +95,6 @@ is refused. Nothing starts with Windows, and closing the app stops its work.
 
 ## Not available yet
 
-UAC/login/unattended service, H.265/AV1, audio, clipboard, printing/Auto Print,
-recording, VPN, Internet ID lookup, NAT/route failover, signed installer and
-signed updates are absent. The relay library is tested separately, not exposed
-by this window. See KNOWN_LIMITATIONS.md.
+UAC/login/installed unattended service, H.265/AV1, audio, clipboard,
+printing/Auto Print, recording, VPN, Internet ID lookup, NAT/route failover,
+signed installer and signed updates are absent. See KNOWN_LIMITATIONS.md.

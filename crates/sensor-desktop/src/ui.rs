@@ -1,9 +1,10 @@
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use sensor_client::Mode;
+use sensor_core::DeviceId;
 use sensor_desktop::{
     hex, parse_hex, peer,
     settings::{self, Contact},
-    worker::{self, Event, Job, Task},
+    worker::{self, Event, Job, RelayRoute, Route, Task},
 };
 use sensor_files::TransferId;
 use sensor_identity::{DeviceIdentity, IdentityFileStore};
@@ -121,6 +122,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 peer_key: String::new(),
                 address: "127.0.0.1:5909".into(),
                 bind: "127.0.0.1:5909".into(),
+                use_relay: false,
+                relay_address: "127.0.0.1:5910".into(),
+                relay_key: String::new(),
+                auto_accept: false,
+                allow_unpinned: false,
                 confirmed: false,
                 receive,
                 file: None,
@@ -170,6 +176,11 @@ struct App {
     peer_key: String,
     address: String,
     bind: String,
+    use_relay: bool,
+    relay_address: String,
+    relay_key: String,
+    auto_accept: bool,
+    allow_unpinned: bool,
     confirmed: bool,
     receive: PathBuf,
     file: Option<PathBuf>,
@@ -345,9 +356,94 @@ fn virtual_key(key: egui::Key) -> Option<u16> {
 
 impl App {
     fn ready(&self) -> bool {
-        self.job.is_none() && self.confirmed && peer(&self.peer_id, &self.peer_key).is_ok()
+        self.job.is_none()
+            && self.confirmed
+            && (peer(&self.peer_id, &self.peer_key).is_ok()
+                || (self.allow_unpinned
+                    && !self.peer_id.trim().is_empty()
+                    && self.peer_key.trim().is_empty()
+                    && self.unpinned_peer(&self.peer_id).is_ok()))
+    }
+    fn ready_host(&self) -> bool {
+        self.job.is_none()
+            && self.confirmed
+            && (self.ready()
+                || (self.allow_unpinned
+                    && self.peer_key.trim().is_empty()
+                    && self.peer_id.trim().is_empty()))
+    }
+    fn unpinned_peer(&self, id: &str) -> Result<ExpectedPeer, String> {
+        let id: String = id.chars().filter(|c| !c.is_whitespace()).collect();
+        let device_id = DeviceId::try_from(
+            id.parse::<u32>()
+                .map_err(|_| "Enter the nine-digit device ID.".to_owned())?,
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(ExpectedPeer {
+            device_id,
+            public_key: [0; 32],
+        })
+    }
+    fn expected_peer(&self, host_any: bool) -> Result<ExpectedPeer, String> {
+        if self.allow_unpinned && self.peer_key.trim().is_empty() {
+            if host_any && self.peer_id.trim().is_empty() {
+                return Ok(ExpectedPeer {
+                    device_id: DeviceId::new(100_000_000)
+                        .ok_or_else(|| "Could not create wildcard device ID.".to_owned())?,
+                    public_key: [0; 32],
+                });
+            }
+            return self.unpinned_peer(&self.peer_id);
+        }
+        peer(&self.peer_id, &self.peer_key)
+    }
+    fn relay_route(&self) -> Result<Route, String> {
+        if self.allow_unpinned && self.peer_key.trim().is_empty() {
+            return Err(
+                "Provisioned relay mode requires both endpoint public keys; use Direct TCP for first connection trust.".into(),
+            );
+        }
+        Ok(Route::Relay(RelayRoute {
+            address: self
+                .relay_address
+                .trim()
+                .parse()
+                .map_err(|_| "Use a valid relay IP address and port.".to_owned())?,
+            relay_key: parse_hex(&self.relay_key)?,
+        }))
+    }
+    fn outbound_route(&self) -> Result<Route, String> {
+        if self.use_relay {
+            self.relay_route()
+        } else {
+            Ok(Route::Direct(self.address.trim().parse().map_err(
+                |_| "Use a valid remote IP address and port.".to_owned(),
+            )?))
+        }
+    }
+    fn listen_route(&self) -> Result<Route, String> {
+        if self.use_relay {
+            self.relay_route()
+        } else {
+            Ok(Route::Direct(self.bind.trim().parse().map_err(|_| {
+                "Use a valid local IP address and port.".to_owned()
+            })?))
+        }
     }
     fn begin(&mut self, task: Task) {
+        if matches!(
+            &task,
+            Task::Host {
+                auto_accept: true,
+                accept_any: true,
+                ..
+            }
+        ) {
+            self.notice = Some(
+                "Auto-accept is available only with a pinned public key. Turn off first-connection trust before enabling it.".into(),
+            );
+            return;
+        }
         self.remote_control = matches!(&task, Task::Remote { control: true, .. });
         if matches!(&task, Task::Remote { .. }) {
             self.page = Page::Remote;
@@ -361,8 +457,20 @@ impl App {
             self.remote_focused = false;
             self.remote_modifiers = [false; 3];
         }
-        match peer(&self.peer_id, &self.peer_key) {
-            Ok(peer) if self.ready() => {
+        let host_any = matches!(
+            &task,
+            Task::Host {
+                accept_any: true,
+                ..
+            }
+        );
+        let task_ready = if host_any {
+            self.ready_host()
+        } else {
+            self.ready()
+        };
+        match self.expected_peer(host_any) {
+            Ok(peer) if task_ready => {
                 self.notice = None;
                 self.progress = None;
                 self.started = Some(Instant::now());
@@ -537,10 +645,21 @@ impl App {
             self.confirmed = false;
         }
         ui.checkbox(
-            &mut self.confirmed,
-            "I verified this public key with the other device owner.",
+            &mut self.allow_unpinned,
+            "Allow a first connection without a pinned key",
         );
-        ui.label(RichText::new("The ID alone does not prove identity. Compare the full key over a trusted channel.").size(12.0).color(MUTED));
+        if self.allow_unpinned {
+            ui.label(RichText::new("The receiver will show the signed peer fingerprint for visible approval. Leave the key empty only for first connection; save the displayed key afterward.").size(12.0).color(Color32::from_rgb(167, 99, 26)));
+        }
+        ui.checkbox(
+            &mut self.confirmed,
+            if self.allow_unpinned {
+                "I understand the first connection must be approved visibly."
+            } else {
+                "I verified this public key with the other device owner."
+            },
+        );
+        ui.label(RichText::new(if self.allow_unpinned { "A device ID alone does not prove identity; approve only a person you recognize and compare the full fingerprint before future connections." } else { "The ID alone does not prove identity. Compare the full key over a trusted channel." }).size(12.0).color(MUTED));
     }
     fn connect(&mut self, ui: &mut egui::Ui) {
         title(
@@ -575,31 +694,56 @@ impl App {
         card(ui, |ui| {
             ui.add_enabled_ui(self.job.is_none(), |ui| self.peer_form(ui));
             ui.separator();
+            ui.label(RichText::new("CONNECTION PATH").strong());
+            ui.horizontal(|ui| {
+                ui.radio_value(&mut self.use_relay, false, "Direct TCP");
+                ui.radio_value(&mut self.use_relay, true, "Provisioned relay");
+            });
+            if self.use_relay {
+                field(
+                    ui,
+                    "RELAY IP : PORT",
+                    &mut self.relay_address,
+                    "relay.example.com:5910",
+                );
+                field(
+                    ui,
+                    "RELAY PUBLIC KEY",
+                    &mut self.relay_key,
+                    "64-character key from the relay operator",
+                );
+                ui.label(RichText::new("Both endpoints must use the same relay address/key, and the relay operator must provision both verified endpoint keys.").size(12.0).color(MUTED));
+            }
+            ui.separator();
             ui.columns(2, |columns| {
                 columns[0].label(RichText::new("Connect to a device").strong());
-                field(
-                    &mut columns[0],
-                    "REMOTE IP : PORT",
-                    &mut self.address,
-                    "192.168.1.10:5909",
-                );
+                if !self.use_relay {
+                    field(
+                        &mut columns[0],
+                        "REMOTE IP : PORT",
+                        &mut self.address,
+                        "192.168.1.10:5909",
+                    );
+                } else {
+                    columns[0].label(
+                        RichText::new("The relay address above is used for this connection.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                }
                 if primary(&mut columns[0], "Start encrypted chat", self.ready()) {
-                    match self.address.parse() {
-                        Ok(address) => self.begin(Task::Chat { address }),
-                        Err(_) => {
-                            self.notice = Some("Use a valid remote IP address and port.".into())
-                        }
+                    match self.outbound_route() {
+                        Ok(route) => self.begin(Task::Chat { route }),
+                        Err(error) => self.notice = Some(error),
                     }
                 }
                 if primary(&mut columns[0], "View remote desktop", self.ready()) {
-                    match self.address.parse() {
-                        Ok(address) => self.begin(Task::Remote {
-                            address,
+                    match self.outbound_route() {
+                        Ok(route) => self.begin(Task::Remote {
+                            route,
                             control: false,
                         }),
-                        Err(_) => {
-                            self.notice = Some("Use a valid remote IP address and port.".into())
-                        }
+                        Err(error) => self.notice = Some(error),
                     }
                 }
                 if columns[0]
@@ -610,36 +754,55 @@ impl App {
                     )
                     .clicked()
                 {
-                    match self.address.parse() {
-                        Ok(address) => self.begin(Task::Remote {
-                            address,
+                    match self.outbound_route() {
+                        Ok(route) => self.begin(Task::Remote {
+                            route,
                             control: true,
                         }),
-                        Err(_) => {
-                            self.notice = Some("Use a valid remote IP address and port.".into())
-                        }
+                        Err(error) => self.notice = Some(error),
                     }
                 }
                 columns[1].label(RichText::new("Receive a connection").strong());
-                field(
-                    &mut columns[1],
-                    "LOCAL LISTEN IP : PORT",
-                    &mut self.bind,
-                    "127.0.0.1:5909",
+                if !self.use_relay {
+                    field(
+                        &mut columns[1],
+                        "LOCAL LISTEN IP : PORT",
+                        &mut self.bind,
+                        "0.0.0.0:5909",
+                    );
+                } else {
+                    columns[1].label(
+                        RichText::new("This endpoint waits for its provisioned relay pair.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                }
+                columns[1].add_enabled_ui(!self.allow_unpinned, |ui| {
+                    ui.checkbox(
+                        &mut self.auto_accept,
+                        "Auto-accept this pinned peer while SENSOR is open",
+                    );
+                });
+                columns[1].label(
+                    RichText::new(
+                        "Use only after verifying the full public key. This is not a Windows service and stops when the app closes.",
+                    )
+                    .size(12.0)
+                    .color(MUTED),
                 );
-                if primary(&mut columns[1], "Start listening", self.ready()) {
-                    match self.bind.parse() {
-                        Ok(address) => self.begin(Task::Host {
-                            address,
+                if primary(&mut columns[1], "Start listening", self.ready_host()) {
+                    match self.listen_route() {
+                        Ok(route) => self.begin(Task::Host {
+                            route,
                             receive_dir: self.receive.clone(),
+                            auto_accept: self.auto_accept,
+                            accept_any: self.allow_unpinned && self.peer_key.trim().is_empty(),
                         }),
-                        Err(_) => {
-                            self.notice = Some("Use a valid local IP address and port.".into())
-                        }
+                        Err(error) => self.notice = Some(error),
                     }
                 }
             });
-            ui.label(RichText::new("Remote desktop is attended: the other Windows user must approve View or Control. 127.0.0.1 is this PC only; choose a reachable LAN address for another PC.").size(12.0).color(MUTED));
+            ui.label(RichText::new("Remote desktop is attended: the other Windows user must approve View or Control. Direct TCP needs a reachable address and firewall rule; the provisioned relay keeps endpoint traffic encrypted while forwarding it.").size(12.0).color(MUTED));
         });
     }
     fn files(&mut self, ui: &mut egui::Ui) {
@@ -652,12 +815,20 @@ impl App {
         card(ui, |ui| {
             ui.add_enabled_ui(self.job.is_none(), |ui| {
                 self.peer_form(ui);
-                field(
-                    ui,
-                    "REMOTE IP : PORT",
-                    &mut self.address,
-                    "192.168.1.10:5909",
-                );
+                if !self.use_relay {
+                    field(
+                        ui,
+                        "REMOTE IP : PORT",
+                        &mut self.address,
+                        "192.168.1.10:5909",
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("Provisioned relay path is selected on Connect.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Choose file...").clicked() {
                         if let Some(file) = rfd::FileDialog::new().pick_file() {
@@ -685,14 +856,15 @@ impl App {
                 } else {
                     parse_hex(&self.resume).map(|id| Some(TransferId(id)))
                 };
-                match (self.address.parse(), resume, self.file.clone()) {
-                    (Ok(address), Ok(resume), Some(file)) => self.begin(Task::Send {
-                        address,
+                match (self.outbound_route(), resume, self.file.clone()) {
+                    (Ok(route), Ok(resume), Some(file)) => self.begin(Task::Send {
+                        route,
                         file,
                         resume,
                     }),
                     (_, Err(e), _) => self.notice = Some(e),
-                    _ => self.notice = Some("Use a valid remote IP address and port.".into()),
+                    (Err(e), _, _) => self.notice = Some(e),
+                    _ => self.notice = Some("Choose a file first.".into()),
                 }
             }
             if let Some((bytes, total)) = self.progress {
@@ -1102,7 +1274,7 @@ impl App {
             ));
             ui.label(format!("Profile directory: {}", self.config.display()));
             ui.label(format!("Network: {}", self.status));
-            ui.label("Transport in this window: direct TCP. Mutual pinned-key authentication; X25519 + Ed25519 + ChaCha20-Poly1305.");
+            ui.label("Transport in this window: direct TCP or a provisioned SENSOR relay. Mutual pinned-key authentication; X25519 + Ed25519 + ChaCha20-Poly1305.");
             ui.label("Window rendering: native egui / wgpu. No browser or WebView.");
             ui.add_enabled_ui(self.job.is_none(), |ui| {
                 field(
@@ -1156,7 +1328,7 @@ impl App {
         card(ui, |ui| {
             ui.label(RichText::new("Release status: not production ready").strong());
             ui.label("Available here: persistent identity, attended encrypted chat, integrity-checked file send/receive, explicit reconnect-and-resume, local contacts, signed incoming-session audit.");
-            ui.label("Not implemented: unattended service, UAC/login screen, H.265/AV1, audio, clipboard, printing, Auto Print, VPN, signed installers/updates. Relay is currently library-only, not selectable in this window. No Internet ID lookup or NAT traversal. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop and remains a development feature.");
+            ui.label("Not implemented: installed Windows service, UAC/login screen, H.265/AV1, audio, clipboard, printing, Auto Print, VPN, signed installers/updates, Internet ID lookup, and NAT traversal. Provisioned relay routing is available when both endpoints and the relay are configured. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
             ui.label(
                 RichText::new("Designed by ENG Mohamed Sayed • SENSOR TECHNOLOGY")
                     .size(12.0)

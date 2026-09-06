@@ -1,23 +1,40 @@
-# Relay — implemented library, not deployed service
+# SENSOR provisioned relay
 
-`sensor-relay` authenticates one explicitly provisioned pair using pinned
-Ed25519 keys. A server-signed fresh challenge is verified by each endpoint;
-the endpoint signs the challenge plus its own identity. Unknown keys, wrong
-relay pins and duplicate pair roles are rejected.
+`sensor-relay.exe` is a small self-hosted relay for one explicitly provisioned
+pair of SENSOR endpoints. It is useful when the two PCs cannot accept a direct
+TCP connection. The relay authenticates both endpoint public keys, then copies
+their byte streams; it cannot decrypt the endpoint-to-endpoint application
+records and it never opens a remote-controlled destination socket.
 
-After both endpoints authenticate, the relay joins their streams. The normal
-endpoint-to-endpoint pinned handshake and encrypted record protocol then run
-unchanged through that stream. The relay does not decrypt app records.
+The relay is intentionally not a public rendezvous service. It has no global
+device directory, NAT traversal, automatic room allocation, regional routing,
+quota system, metrics, TLS metadata protection, or multi-tenant provisioning.
+Those pieces still require a separately operated backend.
 
-Pairing has a deadline, authentication is bounded, rejection count is bounded,
-copy buffers are fixed-size and backpressure uses blocking socket I/O.
-Both directions have an idle timeout. Clean EOF half-closes the opposite writer
-without discarding the other direction; I/O failures abort the pair.
+## Start the relay
 
-Tests run a genuine TCP/endpoint-encrypted round trip through this relay and
-reject an incorrect relay pin. Forwarded byte counts are asserted.
+On the relay host:
 
-This is **not integrated into SENSOR-Remote or SENSOR-CLI** and is not an
-independently deployable service. It has no concurrent rooms, TLS metadata
-protection, regional routing, persistent provisioning, metrics, production
-quotas or automatic direct-first selection. Internet exposure is not advised.
+```powershell
+.\sensor-relay.exe identity C:\SENSOR\Relay
+.\sensor-relay.exe serve C:\SENSOR\Relay 0.0.0.0:5910 <endpoint-a-public-key> <endpoint-b-public-key>
+```
+
+The first command creates `relay-seed.bin` and prints the relay public key.
+Protect that file and the relay host. The second command prints the listening
+address and runs continuously, serving one pair at a time. Open only the chosen
+relay TCP port in the server firewall.
+
+On both SENSOR-Remote windows select **Provisioned relay**, enter the relay
+address and the printed relay public key, then use the verified peer ID and
+public key as usual. The receiver must start listening and the initiator starts
+the desired chat, file, view, or control operation.
+
+The receiver's relay session joins the same authenticated endpoint handshake as
+the direct path. A correct relay pin is required before the endpoint sends its
+identity response. Wrong relay keys, unknown endpoint keys, duplicate keys,
+pairing timeouts and idle timeouts are rejected.
+
+This is a deployment aid for the current attended product, not a claim of full
+commercial remote-access parity. Automatic direct-first fallback, reconnect,
+Internet ID lookup and NAT traversal remain future work.

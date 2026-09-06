@@ -33,17 +33,20 @@ modify the firewall, or configure unattended access on startup.
   updates, and permission-checked mouse/keyboard/text/wheel input. The GUI
   viewport is native egui/wgpu; it is not an HTML canvas or JPEG stream.
 - Local verified contacts, persistent alias, signed incoming-session audit.
-- A separately tested two-peer authenticated relay library. **The app and CLI
-  do not select it yet.** No claim of direct/relay failover.
+- A provisioned two-peer authenticated relay path. `sensor-relay.exe` is a
+  self-hostable single-pair forwarder; the GUI can use it when both endpoints
+  are configured with its address and public key. Endpoint application records
+  remain encrypted end-to-end. Automatic Internet ID lookup, NAT traversal,
+  and direct/relay failover are not included.
 
 ## Important remaining work
 
-The attended screen/control path is implemented, but the complete product
-requested in the brief is not finished. Unattended service/login/UAC, audio,
-clipboard, printing/Auto Print, recording, VPN/tunnels, discovery/Internet ID,
-NAT traversal, enterprise administration, installers, signed updates, and
-cross-machine/Internet certification remain. The relay is still a tested
-library rather than a deployed route selected by the GUI.
+The attended screen/control path and explicitly provisioned relay path are
+implemented, but the complete product requested in the brief is not finished.
+Installed unattended service/login/UAC, audio, clipboard, printing/Auto Print,
+recording, VPN/tunnels, discovery/Internet ID, NAT traversal, enterprise
+administration, installers, signed updates, and cross-machine/Internet
+certification remain.
 
 Actual DXGI capture and SendInput testing must be performed on an unlocked
 interactive desktop. The current locked test session has verified the code's
@@ -53,7 +56,8 @@ See [parity](docs/PARITY_MATRIX.md) and [limitations](docs/KNOWN_LIMITATIONS.md)
 ## Run and build
 
 See [Windows guide](docs/WINDOWS_APP.md). The portable development executables
-are `SENSOR-Remote.exe` (desktop) and `SENSOR-CLI.exe` (console endpoint).
+are `SENSOR-Remote.exe` (desktop), `SENSOR-CLI.exe` (console endpoint), and
+`sensor-relay.exe` (self-hosted provisioned relay).
 They are unsigned: there is no supplied publisher signing certificate.
 Running this development build requires Direct3D 12 and the Visual C++ x64
 runtime (VCRUNTIME140.dll). Neither an installer nor a runtime installer is bundled.

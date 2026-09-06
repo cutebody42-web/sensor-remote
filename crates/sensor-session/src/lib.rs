@@ -155,6 +155,53 @@ pub fn accept_hello(
     Ok((state, server_hello))
 }
 
+/// Accept a first connection when the endpoint owner has deliberately chosen
+/// visible trust-on-first-use. The target device ID and target identity key
+/// are still bound to this endpoint, the caller signature is still verified,
+/// and the real peer key is retained in the resulting secure session so the UI
+/// can display it in the consent prompt. This function must not be used for
+/// unattended access without a separate authenticated policy.
+pub fn accept_hello_unpinned(
+    identity: &IdentityKeypair,
+    device_id: DeviceId,
+    client_hello: ClientHello,
+) -> Result<(ResponderState, ServerHello), SessionError> {
+    if client_hello.version != PROTOCOL_VERSION {
+        return Err(SessionError::UnsupportedVersion);
+    }
+    if client_hello.target_device_id != device_id
+        || (client_hello.target_identity_key != [0; 32]
+            && client_hello.target_identity_key != identity.public_key())
+    {
+        return Err(SessionError::PeerMismatch);
+    }
+    sensor_crypto::IdentityKeypair::verify(
+        &client_hello.identity_public_key,
+        &client_signature_bytes(&client_hello)?,
+        &client_hello.signature,
+    )?;
+
+    let ephemeral = EphemeralKeypair::generate();
+    let mut nonce = [0u8; 32];
+    OsRng.fill_bytes(&mut nonce);
+    let mut server_hello = ServerHello {
+        version: PROTOCOL_VERSION,
+        device_id,
+        identity_public_key: identity.public_key(),
+        ephemeral_public_key: ephemeral.public_key(),
+        client_nonce: client_hello.nonce,
+        nonce,
+        signature: Vec::new(),
+    };
+    server_hello.signature = identity.sign(&server_signature_bytes(&client_hello, &server_hello)?);
+    let state = ResponderState {
+        ephemeral,
+        client_hello,
+        server_hello: server_hello.clone(),
+    };
+    Ok((state, server_hello))
+}
+
 pub fn finish_initiator(
     state: InitiatorState,
     server_hello: ServerHello,
@@ -166,7 +213,8 @@ pub fn finish_initiator(
         return Err(SessionError::NonceMismatch);
     }
     if server_hello.device_id != state.expected.device_id
-        || server_hello.identity_public_key != state.expected.public_key
+        || (state.expected.public_key != [0; 32]
+            && server_hello.identity_public_key != state.expected.public_key)
     {
         return Err(SessionError::PeerMismatch);
     }
@@ -274,5 +322,36 @@ mod tests {
             ),
             Err(SessionError::Crypto(CryptoError::SignatureVerification))
         ));
+    }
+
+    #[test]
+    fn unpinned_first_connection_still_authenticates_both_signed_identities() {
+        let initiator_identity = IdentityKeypair::from_seed([5u8; 32]);
+        let responder_identity = IdentityKeypair::from_seed([6u8; 32]);
+        let initiator_id = DeviceId::new(111_222_334).unwrap();
+        let responder_id = DeviceId::new(444_555_667).unwrap();
+        let (initiator_state, hello) = start_initiator(
+            &initiator_identity,
+            initiator_id,
+            ExpectedPeer {
+                device_id: responder_id,
+                public_key: [0; 32],
+            },
+        );
+        let (responder_state, server_hello) =
+            accept_hello_unpinned(&responder_identity, responder_id, hello).unwrap();
+        let initiator = finish_initiator(initiator_state, server_hello).unwrap();
+        let responder = finish_responder(responder_state).unwrap();
+        assert_eq!(initiator.peer_device_id(), responder_id);
+        assert_eq!(
+            initiator.peer_identity_key(),
+            responder_identity.public_key()
+        );
+        assert_eq!(responder.peer_device_id(), initiator_id);
+        assert_eq!(
+            responder.peer_identity_key(),
+            initiator_identity.public_key()
+        );
+        assert_eq!(initiator.transcript_hash(), responder.transcript_hash());
     }
 }

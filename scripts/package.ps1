@@ -17,7 +17,7 @@ try {
     if ($LASTEXITCODE) { throw 'Dependency metadata failed' }
     $metadata = $metadataText | ConvertFrom-Json
     $null = New-Item -ItemType Directory -Path $packagePath
-    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','LICENSE','README.md' -Destination $packagePath
+    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','target\release\sensor-relay.exe','LICENSE','README.md' -Destination $packagePath
     Copy-Item -LiteralPath 'docs' -Destination (Join-Path $packagePath 'docs') -Recurse
     $licenseRoot = Join-Path $packagePath 'third-party-licenses'
     $null = New-Item -ItemType Directory -Path $licenseRoot
@@ -43,7 +43,7 @@ try {
     $inventory | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $packagePath 'DEPENDENCIES.json') -Encoding utf8
     & git rev-parse HEAD | Set-Content -LiteralPath (Join-Path $packagePath 'SOURCE_REVISION.txt') -Encoding utf8
     if ($LASTEXITCODE) { throw 'Cannot record source revision' }
-    $hashes = Get-FileHash -LiteralPath (Join-Path $packagePath 'SENSOR-Remote.exe'),(Join-Path $packagePath 'SENSOR-CLI.exe') -Algorithm SHA256
+    $hashes = Get-FileHash -LiteralPath (Join-Path $packagePath 'SENSOR-Remote.exe'),(Join-Path $packagePath 'SENSOR-CLI.exe'),(Join-Path $packagePath 'sensor-relay.exe') -Algorithm SHA256
     $hashes | ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_.Path) } |
         Set-Content -LiteralPath (Join-Path $packagePath 'SHA256SUMS.txt') -Encoding utf8
     Write-Output "Packaged unsigned Windows development build: $packagePath"

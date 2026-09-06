@@ -6,8 +6,8 @@ use sensor_protocol::{
     ClientHello, Frame, MessageType, ProtocolError, MAX_FRAME_SIZE, PROTOCOL_VERSION,
 };
 use sensor_session::{
-    accept_hello, finish_initiator, finish_responder, start_initiator, ExpectedPeer, SecureSession,
-    SessionError,
+    accept_hello, accept_hello_unpinned, finish_initiator, finish_responder, start_initiator,
+    ExpectedPeer, SecureSession, SessionError,
 };
 use serde::{de::DeserializeOwned, Serialize};
 use std::{
@@ -203,6 +203,46 @@ impl SecureConnection {
         let hello: ClientHello = request.decode_payload()?;
         let (pending, response) =
             accept_hello(local.keypair(), local.device_id(), hello, expected)?;
+        write_frame(
+            &mut stream,
+            &Frame::new(MessageType::ServerHello, &response)?,
+            deadline,
+        )?;
+        let session = finish_responder(pending)?;
+        let mut connection = Self {
+            stream,
+            peer: ExpectedPeer {
+                device_id: session.peer_device_id(),
+                public_key: session.peer_identity_key(),
+            },
+            transcript: session.transcript_hash(),
+            session: Some(session),
+            timeout,
+            closed: false,
+        };
+        if connection.receive_bytes(deadline)? != CLIENT_FINISH {
+            return Err(ConnectionError::UnexpectedMessage);
+        }
+        connection.send_bytes(SERVER_FINISH, deadline)?;
+        Ok(connection)
+    }
+
+    /// Accept an explicitly attended first connection without a pre-pinned
+    /// caller key. The caller's signed identity is still authenticated and is
+    /// exposed via `peer()` before application consent is requested.
+    pub fn accept_unpinned(
+        mut stream: TcpStream,
+        local: &DeviceIdentity,
+        timeout: Duration,
+    ) -> Result<Self, ConnectionError> {
+        stream.set_nodelay(true)?;
+        let deadline = Instant::now() + timeout;
+        let request = read_frame(&mut stream, HANDSHAKE_LIMIT, deadline)?;
+        if request.message_type != MessageType::ClientHello {
+            return Err(ConnectionError::UnexpectedMessage);
+        }
+        let hello: ClientHello = request.decode_payload()?;
+        let (pending, response) = accept_hello_unpinned(local.keypair(), local.device_id(), hello)?;
         write_frame(
             &mut stream,
             &Frame::new(MessageType::ServerHello, &response)?,

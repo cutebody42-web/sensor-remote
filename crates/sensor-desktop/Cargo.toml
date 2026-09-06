@@ -20,6 +20,7 @@ sensor-transport = { path = "../sensor-transport" }
 sensor-files = { path = "../sensor-files" }
 sensor-audit = { path = "../sensor-audit" }
 sensor-media = { path = "../sensor-media" }
+sensor-relay = { path = "../sensor-relay" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

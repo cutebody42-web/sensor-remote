@@ -3,6 +3,7 @@ use sensor_client::{LocalInteraction, Message, Mode};
 use sensor_files::{Receiver as FileReceiver, TransferId};
 use sensor_identity::DeviceIdentity;
 use sensor_media::{DecodedFrame, DesktopMessage, Display, VideoFormat};
+use sensor_relay::join as join_relay;
 use sensor_session::ExpectedPeer;
 use sensor_transport::connection::{ConnectionAbort, SecureConnection, DEFAULT_TIMEOUT};
 use std::{
@@ -43,21 +44,44 @@ pub enum Event {
     Finished(Result<String, String>),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelayRoute {
+    pub address: SocketAddr,
+    pub relay_key: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Route {
+    Direct(SocketAddr),
+    Relay(RelayRoute),
+}
+
+impl Route {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Direct(_) => "Direct TCP",
+            Self::Relay(_) => "Secure relay",
+        }
+    }
+}
+
 pub enum Task {
     Host {
-        address: SocketAddr,
+        route: Route,
         receive_dir: PathBuf,
+        auto_accept: bool,
+        accept_any: bool,
     },
     Chat {
-        address: SocketAddr,
+        route: Route,
     },
     Send {
-        address: SocketAddr,
+        route: Route,
         file: PathBuf,
         resume: Option<TransferId>,
     },
     Remote {
-        address: SocketAddr,
+        route: Route,
         control: bool,
     },
 }
@@ -196,9 +220,17 @@ struct Interaction<'a> {
     events: &'a SyncSender<Event>,
     control: &'a Control,
     progress_at: Instant,
+    auto_accept: bool,
 }
 impl LocalInteraction for Interaction<'_> {
     fn accept(&mut self, peer: ExpectedPeer, mode: Mode) -> bool {
+        if self.auto_accept {
+            let _ = self.events.send(Event::Status(format!(
+                "Auto-accepted {mode:?} session • pinned peer {} • explicit local profile",
+                peer.device_id
+            )));
+            return true;
+        }
         let (sender, receiver) = mpsc::sync_channel(1);
         let accepted = self.events.send(Event::Consent(peer, mode, sender)).is_ok()
             && wait_reply(receiver, self.control).unwrap_or(false);
@@ -242,6 +274,21 @@ fn compose(events: &SyncSender<Event>, control: &Control) -> Option<String> {
     wait_reply(receiver, control).flatten()
 }
 
+fn connect_route(route: &Route, identity: &DeviceIdentity) -> Result<TcpStream, String> {
+    match route {
+        Route::Direct(address) => {
+            TcpStream::connect_timeout(address, DEFAULT_TIMEOUT).map_err(|error| error.to_string())
+        }
+        Route::Relay(relay) => join_relay(
+            relay.address,
+            identity.keypair(),
+            &relay.relay_key,
+            DEFAULT_TIMEOUT,
+        )
+        .map_err(|error| error.to_string()),
+    }
+}
+
 fn execute(
     task: Task,
     identity: DeviceIdentity,
@@ -256,80 +303,125 @@ fn execute(
             .map_err(|_| "Window closed".to_owned())
     };
     if let Task::Host {
-        address,
+        route,
         ref receive_dir,
+        auto_accept,
+        accept_any,
     } = task
     {
         let receiver = FileReceiver::open(receive_dir).map_err(|e| e.to_string())?;
         let mut log = AuditLog::open(&config.join("audit.jsonl"), identity.keypair())
             .map_err(|e| e.to_string())?;
-        let listener = TcpListener::bind(address).map_err(|e| e.to_string())?;
-        listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        status(format!(
-            "Listening on {} • permitted peer {}",
-            listener.local_addr().map_err(|e| e.to_string())?,
-            peer.device_id
-        ))?;
-        while !control.is_stopped() {
-            match listener.accept() {
-                Ok((stream, _)) => {
-                    stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-                    control.socket(&stream)?;
-                    let mut connection =
-                        match SecureConnection::accept(stream, &identity, peer, DEFAULT_TIMEOUT) {
-                            Ok(connection) => connection,
-                            Err(_) if !control.is_stopped() => {
-                                status("Unverified connection refused. Still listening.".into())?;
-                                continue;
-                            }
-                            Err(e) => return Err(e.to_string()),
-                        };
-                    connection
-                        .set_timeout(Duration::from_secs(120))
-                        .map_err(|e| e.to_string())?;
-                    status(format!(
-                        "Authenticated peer {} • Direct TCP • Awaiting local consent",
-                        peer.device_id
-                    ))?;
-                    let mut interaction = Interaction {
-                        events,
-                        control,
-                        progress_at: Instant::now(),
-                    };
-                    sensor_client::serve(
-                        connection,
-                        identity.device_id(),
-                        &receiver,
-                        &mut log,
-                        &mut interaction,
-                    )
-                    .map_err(|e| e.to_string())?;
-                    return Ok(format!(
-                        "Session ended. {} signed audit records.",
-                        log.head().records
-                    ));
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(30))
-                }
-                Err(e) => return Err(e.to_string()),
+        let listener = match &route {
+            Route::Direct(address) => {
+                let listener = TcpListener::bind(address).map_err(|e| e.to_string())?;
+                listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+                status(format!(
+                    "Listening on {} • permitted peer {} • {}",
+                    listener.local_addr().map_err(|e| e.to_string())?,
+                    peer.device_id,
+                    route.label()
+                ))?;
+                Some(listener)
             }
-        }
-        return Ok("Listener stopped. No incoming connections accepted.".into());
+            Route::Relay(relay) => {
+                status(format!(
+                    "Waiting at secure relay {} • permitted peer {}",
+                    relay.address, peer.device_id
+                ))?;
+                None
+            }
+        };
+        let mut connection = loop {
+            let stream = match &listener {
+                Some(listener) => loop {
+                    if control.is_stopped() {
+                        return Ok("Listener stopped. No incoming connections accepted.".into());
+                    }
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+                            break stream;
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(30));
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                },
+                None => match &route {
+                    Route::Relay(relay) => join_relay(
+                        relay.address,
+                        identity.keypair(),
+                        &relay.relay_key,
+                        DEFAULT_TIMEOUT,
+                    )
+                    .map_err(|error| error.to_string())?,
+                    Route::Direct(_) => unreachable!("direct routes always have a listener"),
+                },
+            };
+            control.socket(&stream)?;
+            let accepted = if accept_any {
+                SecureConnection::accept_unpinned(stream, &identity, DEFAULT_TIMEOUT)
+            } else {
+                SecureConnection::accept(stream, &identity, peer, DEFAULT_TIMEOUT)
+            };
+            match accepted {
+                Ok(connection) => break connection,
+                Err(error) if listener.is_some() && !control.is_stopped() => {
+                    status(format!(
+                        "Unverified connection refused ({error}). Still listening."
+                    ))?;
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        };
+        connection
+            .set_timeout(Duration::from_secs(120))
+            .map_err(|e| e.to_string())?;
+        status(format!(
+            "Authenticated peer {} • {} • Awaiting local consent",
+            peer.device_id,
+            route.label()
+        ))?;
+        let mut interaction = Interaction {
+            events,
+            control,
+            progress_at: Instant::now(),
+            auto_accept,
+        };
+        sensor_client::serve(
+            connection,
+            identity.device_id(),
+            &receiver,
+            &mut log,
+            &mut interaction,
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(format!(
+            "Session ended. {} signed audit records.",
+            log.head().records
+        ));
     }
-    let address = match task {
-        Task::Chat { address } | Task::Send { address, .. } => address,
+    let route = match &task {
+        Task::Chat { route } | Task::Send { route, .. } => route.clone(),
         Task::Remote {
-            address,
+            route,
             control: remote_control,
         } => {
-            return execute_remote(address, remote_control, identity, peer, events, control);
+            return execute_remote(
+                route.clone(),
+                *remote_control,
+                identity,
+                peer,
+                events,
+                control,
+            );
         }
         _ => unreachable!(),
     };
-    status(format!("Connecting to {address}..."))?;
-    let stream =
-        TcpStream::connect_timeout(&address, DEFAULT_TIMEOUT).map_err(|e| e.to_string())?;
+    status(format!("Connecting via {}...", route.label()))?;
+    let stream = connect_route(&route, &identity)?;
     control.socket(&stream)?;
     let mut connection = SecureConnection::initiate(stream, &identity, peer, DEFAULT_TIMEOUT)
         .map_err(|e| e.to_string())?;
@@ -337,8 +429,9 @@ fn execute(
         .set_timeout(Duration::from_secs(120))
         .map_err(|e| e.to_string())?;
     status(format!(
-        "Authenticated {} • Direct TCP • Waiting for acceptance",
-        peer.device_id
+        "Authenticated {} • {} • Waiting for acceptance",
+        peer.device_id,
+        route.label()
     ))?;
     if let Task::Send { file, resume, .. } = task {
         let mut updated = Instant::now() - Duration::from_secs(1);
@@ -362,8 +455,9 @@ fn execute(
     }
     sensor_client::request(&mut connection, Mode::Chat).map_err(|e| e.to_string())?;
     status(format!(
-        "Chat accepted • peer {} • Direct TCP • ChaCha20-Poly1305",
-        peer.device_id
+        "Chat accepted • peer {} • {} • ChaCha20-Poly1305",
+        peer.device_id,
+        route.label()
     ))?;
     while let Some(text) = compose(events, control) {
         connection
@@ -707,7 +801,7 @@ fn host_desktop(
 
 #[cfg(windows)]
 fn execute_remote(
-    address: SocketAddr,
+    route: Route,
     control_mode: bool,
     identity: DeviceIdentity,
     peer: ExpectedPeer,
@@ -715,10 +809,12 @@ fn execute_remote(
     control: &Control,
 ) -> Result<String, String> {
     events
-        .send(Event::Status(format!("Connecting to {address}...")))
+        .send(Event::Status(format!(
+            "Connecting via {}...",
+            route.label()
+        )))
         .map_err(|_| "Window closed".to_owned())?;
-    let stream =
-        TcpStream::connect_timeout(&address, DEFAULT_TIMEOUT).map_err(|e| e.to_string())?;
+    let stream = connect_route(&route, &identity)?;
     control.socket(&stream)?;
     let mut connection = SecureConnection::initiate(stream, &identity, peer, DEFAULT_TIMEOUT)
         .map_err(|error| error.to_string())?;
@@ -733,8 +829,9 @@ fn execute_remote(
     sensor_client::request(&mut connection, mode).map_err(|error| error.to_string())?;
     events
         .send(Event::Status(format!(
-            "Remote desktop active • peer {} • H.264 over encrypted Direct TCP",
-            peer.device_id
+            "Remote desktop active • peer {} • H.264 over {}",
+            peer.device_id,
+            route.label()
         )))
         .map_err(|_| "Window closed".to_owned())?;
     let (mut reader, mut writer) = connection.split().map_err(|error| error.to_string())?;
@@ -841,7 +938,7 @@ fn execute_remote(
 
 #[cfg(not(windows))]
 fn execute_remote(
-    _address: SocketAddr,
+    _route: Route,
     _control_mode: bool,
     _identity: DeviceIdentity,
     _peer: ExpectedPeer,
@@ -861,8 +958,10 @@ mod tests {
         let peer = DeviceIdentity::generate();
         let job = start(
             Task::Host {
-                address: "127.0.0.1:0".parse().unwrap(),
+                route: Route::Direct("127.0.0.1:0".parse().unwrap()),
                 receive_dir: dir.path().into(),
+                auto_accept: false,
+                accept_any: false,
             },
             identity,
             ExpectedPeer {

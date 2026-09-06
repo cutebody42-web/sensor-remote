@@ -216,6 +216,32 @@ pub fn serve_pair(
     })
 }
 
+/// Keep a provisioned pair endpoint available for successive sessions.
+///
+/// The relay intentionally remains a narrow, single-pair service: it never
+/// chooses a destination and it never accepts an unprovisioned identity. A
+/// deployment that needs multiple pairs should run separate instances (or put
+/// an authenticated room allocator in front of this primitive).
+pub fn serve_forever(
+    listener: TcpListener,
+    relay: &IdentityKeypair,
+    allowed: [[u8; 32]; 2],
+    pairing_timeout: Duration,
+    idle_timeout: Duration,
+) -> Result<(), RelayError> {
+    loop {
+        let pair_listener = listener.try_clone()?;
+        match serve_pair(pair_listener, relay, allowed, pairing_timeout, idle_timeout) {
+            Ok(_) => {}
+            Err(RelayError::Timeout | RelayError::Unauthorized) => {
+                // A bad or abandoned attempt must not take down a long-lived
+                // provisioned relay. The next pair may retry immediately.
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

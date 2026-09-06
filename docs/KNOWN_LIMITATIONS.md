@@ -8,16 +8,19 @@ This is a functioning native Windows attended remote-desktop development app,
   interactive desktop. They have not yet completed an unlocked two-device or
   long-running verification run. H.265/AV1, UAC, secure desktop, login-screen
   support and Ctrl+Alt+Del are not implemented.
-- No unattended access, Windows service, tray/background persistence,
-  reconnect after reboot, audio, remote clipboard, recording or privacy mode.
+- No installed unattended access, Windows service, tray/background persistence,
+  password/MFA login, reconnect after reboot, audio, remote clipboard,
+  recording or privacy mode. A visible receiver can explicitly auto-accept one
+  already pinned peer while the GUI remains open.
 - No virtual printer, physical printing pipeline, Auto Print, VPN, tunnels,
   Wake-on-LAN, discovery or whiteboard.
 - GUI and CLI require an IP:port and an out-of-band verified public key.
   A nine-digit ID is random and persistent locally, not globally registered:
   there is no rendezvous/alias service or global collision resolution.
-- The GUI and CLI use direct TCP only. The pair relay is library-only;
-  no route selection, direct-first fallback, TLS metadata privacy, QUIC,
-  ICE/STUN/TURN, NAT traversal, proxy or regional failover is integrated.
+- The GUI supports direct TCP or a self-hosted, provisioned single-pair relay.
+  The CLI remains direct-TCP oriented. There is no automatic direct-first
+  fallback, TLS metadata privacy, QUIC, ICE/STUN/TURN, NAT traversal, proxy or
+  regional failover. The relay is not a public directory service.
 - A profile permits one active GUI job. Incoming mode is chat, file transfer,
   view-only desktop or desktop control;
   no mixed-operation, multi-session or dual-pane file manager.

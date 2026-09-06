@@ -1,4 +1,4 @@
-use sensor_desktop::worker::{self, Event, Job, Task};
+use sensor_desktop::worker::{self, Event, Job, Route, Task};
 use sensor_identity::DeviceIdentity;
 use sensor_session::ExpectedPeer;
 use std::{net::SocketAddr, path::Path, sync::mpsc::SyncSender, time::Duration};
@@ -17,8 +17,10 @@ fn next(job: &Job) -> Event {
 fn listen(identity: DeviceIdentity, peer: ExpectedPeer, root: &Path) -> (Job, SocketAddr) {
     let job = worker::start(
         Task::Host {
-            address: "127.0.0.1:0".parse().unwrap(),
+            route: Route::Direct("127.0.0.1:0".parse().unwrap()),
             receive_dir: root.into(),
+            auto_accept: false,
+            accept_any: false,
         },
         identity,
         peer,
@@ -36,6 +38,38 @@ fn listen(identity: DeviceIdentity, peer: ExpectedPeer, root: &Path) -> (Job, So
         .parse()
         .unwrap();
     (job, address)
+}
+fn listen_first_connection(
+    identity: DeviceIdentity,
+    root: &Path,
+) -> (Job, SocketAddr, DeviceIdentity) {
+    let identity_for_pin = identity.clone();
+    let job = worker::start(
+        Task::Host {
+            route: Route::Direct("127.0.0.1:0".parse().unwrap()),
+            receive_dir: root.into(),
+            auto_accept: false,
+            accept_any: true,
+        },
+        identity,
+        ExpectedPeer {
+            device_id: sensor_core::DeviceId::new(100_000_000).unwrap(),
+            public_key: [0; 32],
+        },
+        root.into(),
+    );
+    let Event::Status(text) = next(&job) else {
+        panic!("expected listener status")
+    };
+    let address = text
+        .strip_prefix("Listening on ")
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    (job, address, identity_for_pin)
 }
 fn consent(job: &Job, accept: bool) {
     loop {
@@ -81,7 +115,7 @@ fn native_worker_file_send_requires_consent_and_finishes_with_exact_bytes() {
     std::fs::write(&file, &bytes).unwrap();
     let sender = worker::start(
         Task::Send {
-            address,
+            route: Route::Direct(address),
             file,
             resume: None,
         },
@@ -110,7 +144,9 @@ fn native_worker_chat_is_bidirectional_and_local_stop_interrupts_wait() {
     let expected = pin(&host);
     let (receiver, address) = listen(host, pin(&client), host_dir.path());
     let sender = worker::start(
-        Task::Chat { address },
+        Task::Chat {
+            route: Route::Direct(address),
+        },
         client,
         expected,
         client_dir.path().into(),
@@ -143,6 +179,49 @@ fn native_worker_chat_is_bidirectional_and_local_stop_interrupts_wait() {
 }
 
 #[test]
+fn first_connection_flow_authenticates_unknown_key_before_consent() {
+    let host_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+    let (receiver, address, host) =
+        listen_first_connection(DeviceIdentity::generate(), host_dir.path());
+    let client = DeviceIdentity::generate();
+    let sender = worker::start(
+        Task::Chat {
+            route: Route::Direct(address),
+        },
+        client.clone(),
+        ExpectedPeer {
+            device_id: host.device_id(),
+            public_key: [0; 32],
+        },
+        client_dir.path().into(),
+    );
+    consent(&receiver, true);
+    compose(&sender)
+        .send(Some("first connection works".into()))
+        .unwrap();
+    let text = loop {
+        match next(&receiver) {
+            Event::Chat(text) => break text,
+            Event::Status(_) => (),
+            _ => panic!("expected first-connection chat"),
+        }
+    };
+    assert_eq!(text, "first connection works");
+    compose(&receiver).send(Some("approved".into())).unwrap();
+    let text = loop {
+        match next(&sender) {
+            Event::Chat(text) => break text,
+            Event::Status(_) => (),
+            _ => panic!("expected first-connection reply"),
+        }
+    };
+    assert_eq!(text, "approved");
+    sender.control.stop();
+    receiver.control.stop();
+}
+
+#[test]
 fn rejected_desktop_worker_session_cannot_create_files() {
     let host_dir = tempfile::tempdir().unwrap();
     let client_dir = tempfile::tempdir().unwrap();
@@ -154,7 +233,7 @@ fn rejected_desktop_worker_session_cannot_create_files() {
     std::fs::write(&file, b"not allowed").unwrap();
     let sender = worker::start(
         Task::Send {
-            address,
+            route: Route::Direct(address),
             file,
             resume: None,
         },
