@@ -1,44 +1,45 @@
-# SENSOR Remote Access Parity Matrix
+# SENSOR Remote Access parity matrix — 0.2.0
 
-This is an internal engineering document. The benchmark product is used only
-as a behavioral reference; no proprietary code, private protocol, key, or
-graphic asset is used.
+Official behavioral research is recorded in [BENCHMARK_RESEARCH.md](BENCHMARK_RESEARCH.md).
+This is clean-room work: no benchmark source code, private protocol or branding.
+The supplied SENSOR logo is used with the owner's request.
 
-Status values:
+Statuses: NOT STARTED, IN PROGRESS, IMPLEMENTED, TESTED, PRODUCTION READY.
+TESTED applies only to the explicitly scoped behavior/test listed; it does not
+mean complete parity. No row is PRODUCTION READY.
 
-- `NOT STARTED`
-- `IN PROGRESS`
-- `IMPLEMENTED`
-- `TESTED`
-- `PRODUCTION READY`
-
-No row is marked `IMPLEMENTED` unless the behavior is present in code. No row
-is marked `PRODUCTION READY` without the release evidence defined in the test
-plan.
-
-| Benchmark capability | SENSOR equivalent | Architecture | Platform support | Implementation status | Test status | Known gaps |
+| Benchmark capability | SENSOR equivalent | Architecture | Platform | Status | Evidence | Remaining gap |
 | --- | --- | --- | --- | --- | --- | --- |
-| Persistent device identity | SENSOR Device ID and alias | `sensor-core`, `sensor-identity` | Core; OS protector pending | IN PROGRESS | Unit tests | Windows DPAPI provider and migration policy |
-| Authenticated connection | Signed hello and ephemeral session keys | `sensor-session`, `sensor-crypto` | Core | TESTED | Handshake and tamper tests | Trust/authorization service |
-| Direct and relay connectivity | Direct-first transport with relay fallback | `sensor-transport`, future rendezvous/relay services | Not started | NOT STARTED | None | ICE/STUN/QUIC/TCP/proxy implementation |
-| Remote desktop | Capture, encode, decode, GPU render | Future `sensor-windows`, `sensor-media`, clients | Not started | NOT STARTED | None | Entire media path |
-| Remote input | Input event channel and platform backend | Future `sensor-input`, `sensor-windows` | Not started | NOT STARTED | None | Secure desktop and permission enforcement |
-| Unattended access | Explicit service-backed unattended profiles | Future `sensor-service` | Windows priority | NOT STARTED | None | Service, login screen, 2FA, ACL |
-| File transfer | Independent and in-session dual-pane transfer | Future `sensor-files` | Not started | NOT STARTED | None | Resumability, integrity, policy |
-| Clipboard | Permission-controlled bidirectional clipboard | Future `sensor-session`, platform backends | Not started | NOT STARTED | None | Text/image/file policies |
-| Remote audio | Low-latency WASAPI/Opus path | Future `sensor-audio` | Windows priority | NOT STARTED | None | Capture, sync, device selection |
-| Remote printing | SENSOR Remote Printer | Future `sensor-print`, Windows service | Windows priority | NOT STARTED | None | Driver, spooler, local printer queue |
-| Auto Print | Explicit rule engine and job queue | Future `sensor-print` and management API | Windows priority | NOT STARTED | None | Watchers, retries, audit |
-| Recording | Consent-aware session/screen recorder | Future `sensor-media`, `sensor-session` | Not started | NOT STARTED | None | Codec/container, metadata, storage |
-| Chat/whiteboard | Encrypted session collaboration | Future protocol modules | Not started | NOT STARTED | None | UI, history, permissions |
-| Wake-on-LAN | LAN helper and topology registry | Future rendezvous/management | Not started | NOT STARTED | None | Helper discovery and authorization |
-| Privacy mode | Visible authorized blanking mode | Future Windows backend/service | Windows priority | NOT STARTED | None | Supported display/driver mechanisms |
-| Address books/discovery | Organization and LAN device directories | Management backend | Not started | NOT STARTED | None | Sync, ACL, privacy controls |
-| Tunnels/VPN | Explicit encrypted tunnel and point-to-point VPN | Future `sensor-tunnel`, `sensor-vpn` | Not started | NOT STARTED | None | Adapter, routing, policy |
-| Management/RBAC/SSO/API | SENSOR Management Console and REST API | Future API/auth services | Not started | NOT STARTED | None | PostgreSQL, OIDC, Entra, LDAP, audit |
-| Deployment/updates | Signed installers, service, staged updates | Future deployment services | Windows priority | NOT STARTED | None | MSI, ADMX/ADML, signing infrastructure |
+| Native desktop client | Windows egui/wgpu EXE with supplied logo | sensor-desktop | Windows | IN PROGRESS | Compiles; native window/accessibility tree observed; worker E2E | Visual QA paused at locked desktop; OS/GPU/accessibility matrix |
+| Persistent ID/alias | DPAPI-backed nine-digit identity, local alias | core/identity/windows | Windows | TESTED | Real DPAPI, atomic reopen, eight-way initialization race | Global registration/collisions, backup, cross-user migration, reboot |
+| Authenticated sessions | Pinned signed target-bound handshake and key confirmation | crypto/session/transport | Core + Windows endpoint | TESTED | Real TCP, impostor/tamper/replay/size tests | Independent security review, directory trust lifecycle |
+| Attended permissions | Visible Accept/Reject, chat or file scope, Stop | session/client/desktop | Windows | TESTED | Worker consent, rejection, revocation and cross-mode denial | Custom profiles UI, mixed operations, service policy |
+| Direct transport | Explicit direct TCP socket | transport | Windows endpoint | TESTED | Real sockets and large encrypted records | QUIC/TLS/proxy, UDP candidates |
+| Relay | Authenticated preconfigured pair forwarding | relay | Core | TESTED | Real relayed pinned handshake and data | Library only; not GUI/CLI integrated or deployed |
+| NAT/failover/reconnect | Planned direct-first connection orchestration | transport/rendezvous | Planned | NOT STARTED | None | ICE/STUN, ID lookup, relay selection/failover |
+| Remote desktop/video | Planned capture/codec/GPU remote frame path | windows/media/video | Planned Windows | NOT STARTED | None | Entire remote media path; native UI rendering is not remote video |
+| Remote keyboard/mouse | Planned authorized input backend | input/windows | Planned Windows | NOT STARTED | None | Entire OS input path |
+| Unattended/login/UAC/CAD | Planned installed service | service/windows | Planned Windows | NOT STARTED | None | Explicit credentials/MFA, IPC, secure desktop, reboot |
+| File transfer | Flat-file send/receive with verified resume | files/client/desktop | Windows | IN PROGRESS | Chunk/full hash, TCP worker E2E, root confinement, no-clobber | No dual-pane manager/folders/queue; 1 GiB offer cap; manual resume |
+| Clipboard | Planned permission-controlled text/image/files | session/windows | Planned | NOT STARTED | None | Entire clipboard synchronization |
+| Multi-monitor | Planned monitor enumeration/selection | media/windows | Planned | NOT STARTED | None | Entire monitor/media behavior |
+| Audio | Planned WASAPI/Opus | audio/windows | Planned | NOT STARTED | None | Capture, playback, sync |
+| Remote printing | SENSOR Remote Printer | print/service | Planned Windows | NOT STARTED | None | Driver, spooler, local printer queue |
+| Auto Print | Explicit monitored rules and job queue | print | Planned Windows | NOT STARTED | None | Watchers, retries, physical printing and audit |
+| Recording | Planned consent-aware recording | media/session | Planned | NOT STARTED | None | Codec/container/storage |
+| Chat | Attended encrypted turn-based chat | client/desktop | Windows | IN PROGRESS | Bidirectional worker E2E; file operation denied in chat | Concurrent messaging, optional history/export |
+| Whiteboard | Planned session collaboration | client/media | Planned | NOT STARTED | None | Entire drawing/synchronization behavior |
+| Wake-on-LAN | Planned authorized LAN helper | rendezvous | Planned | NOT STARTED | None | Discovery/topology/helper |
+| Privacy mode | Planned explicit blanking | windows/service | Planned Windows | NOT STARTED | None | OS display/control mechanism |
+| Address book | Verified local contact pins | desktop | Windows | IN PROGRESS | Bounded atomic contact persistence/corruption test | Organization sync, groups, discovery, trust rotation UI |
+| Session history/audit | Signed incoming operation log | audit/client | Windows/core | IN PROGRESS | Signature/hash-chain tamper tests and E2E records | Outgoing/full fields, CSV/search, central checkpoint/retention |
+| Diagnostics | Actual job state, public identity, acknowledged bytes | desktop | Windows | IN PROGRESS | Worker state events, native accessibility tree | No codec/FPS/RTT/loss telemetry because media is absent |
+| Tunnels/VPN | Planned encrypted explicit routes | tunnel/vpn | Planned | NOT STARTED | None | Adapter/routing/permissions UI |
+| Enterprise management/SSO/API | Planned organizational services | management/auth | Planned | NOT STARTED | None | All organization/RBAC/OIDC/Entra/LDAP/database/API behavior |
+| Portable deployment | GUI and CLI Windows binaries | desktop/client | Windows | IN PROGRESS | Local builds; resource/icon manifest | Unsigned; no certified Windows support matrix |
+| Installer/MSI/updates | Planned signed lifecycle | deployment/update | Planned | NOT STARTED | None | Signing key/infrastructure, installers, rollback |
+| Cross-platform clients | Planned platform-specific ports | platform/client | Planned | NOT STARTED | Core library design only | Native clients and OS restrictions tests |
+| Performance/release gate | Full product validation | all | Planned matrix | NOT STARTED | No release certification | Two-machine/VM/NAT/loss/codec/8h+ tests and independent review |
 
-Public benchmark research captured on 2026-09-06 is summarized in
-[`BENCHMARK_RESEARCH.md`](BENCHMARK_RESEARCH.md). New capabilities discovered
-during future research must be added here before implementation claims are
-made.
+See [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md) for exact restrictions.
+The full product brief is not completed by these implemented subsets.

@@ -1,27 +1,25 @@
-# Gap Analysis
+# Gap analysis — 0.2.0
 
-## Blocking gaps before an end-to-end remote session
+## Present
 
-1. A real transport abstraction and network I/O are missing.
-2. Rendezvous, NAT traversal, direct-path selection, relay fallback, and proxy
-   support are missing.
-3. The identity store needs a Windows DPAPI/credential-isolation provider and
-   an explicit migration/backup policy.
-4. Endpoint authorization, permission profiles, attended consent, and session
-   lifecycle policy are missing.
-5. Windows capture, hardware encoding, GPU rendering, and input injection are
-   missing.
+Native Windows window with supplied logo; DPAPI-backed persistent identity;
+explicitly pinned real TCP sessions and key confirmation; visible consent;
+mode-scoped permissions; attended chat and root-confined, checksummed file
+transfer; explicit reconnect/resume; local contacts/alias; signed incoming audit.
+A separately tested pair relay library exists but is not selected by the app.
 
-## Product gaps
+## Blocking the requested remote-desktop experience
 
-File transfer, clipboard, audio, printing, Auto Print, recording, chat,
-whiteboard, Wake-on-LAN, privacy mode, tunnels, VPN, address books, discovery,
-history, management, RBAC, SSO, API, installers, updates, and cross-platform
-clients are all not started.
+1. Screen capture, H.264/H.265/AV1 pipeline, remote GPU video presentation,
+   mouse/keyboard input, multi-monitor and performance adaptation.
+2. Rendezvous/ID lookup, global ID registration, NAT traversal, direct-first
+   relay fallback, proxies and reconnect/failover.
+3. Windows service, secure IPC, explicit unattended credentials/MFA, reboot,
+   login, secure desktop/UAC and Ctrl+Alt+Del.
+4. Audio, clipboard, physical remote printing/Auto Print, recording, privacy,
+   discovery, VPN/tunnels and the enterprise platform.
+5. Signed deployment and updates, release security review, VM/physical-device
+   matrix, adverse networks and multi-hour stability evidence.
 
-## Quality and release gaps
-
-The local Rust format, unit/doc-test, and strict lint suites pass. The checked-in
-CI workflow has not yet run on a hosted runner. There are no two-machine,
-VM-matrix, fuzz, long-duration, installer, performance, or security-review
-results. These are release blockers, not optional follow-up work.
+The project is not complete. No M1/M2 partial slice or native GUI constitutes
+the requested 1.0 product. See the parity matrix for individual capabilities.

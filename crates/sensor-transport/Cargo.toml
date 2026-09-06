@@ -8,7 +8,11 @@ license.workspace = true
 [dependencies]
 sensor-protocol = { path = "../sensor-protocol" }
 thiserror.workspace = true
+sensor-core = { path = "../sensor-core" }
+sensor-identity = { path = "../sensor-identity" }
+sensor-session = { path = "../sensor-session" }
+sensor-crypto = { path = "../sensor-crypto" }
+serde.workspace = true
 
 [dev-dependencies]
 serde.workspace = true
-

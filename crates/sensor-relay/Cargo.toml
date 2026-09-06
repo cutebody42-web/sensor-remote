@@ -1,0 +1,16 @@
+[package]
+name = "sensor-relay"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+sensor-crypto = { path = "../sensor-crypto" }
+rand_core.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+sensor-identity = { path = "../sensor-identity" }
+sensor-session = { path = "../sensor-session" }
+sensor-transport = { path = "../sensor-transport" }

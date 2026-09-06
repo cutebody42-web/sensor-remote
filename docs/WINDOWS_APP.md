@@ -1,0 +1,72 @@
+# Using the native Windows app
+
+SENSOR-Remote.exe is the graphical application. SENSOR-CLI.exe is an optional
+console companion. Neither is a website. This is version 0.2.0 development,
+not the completed remote-desktop product.
+
+## First launch
+
+1. Open SENSOR-Remote.exe. It runs as the current user, without elevation.
+2. Your persistent device ID appears. Copy the public key to the other device
+   owner through a trusted channel and compare the full key.
+3. It is normal to see **Offline — No listener started**. There is no deployed
+   rendezvous service, so it cannot honestly advertise Internet ID connectivity.
+
+The supplied JPEG logo is embedded unchanged; no extra image file or browser
+runtime is needed. Window rendering uses native egui/wgpu Direct3D 12.
+
+## Two-PC attended chat
+
+1. Exchange both device IDs and public keys. On each PC enter the other peer's
+   ID/key and confirm that you compared it.
+2. On the receiving PC, choose its local LAN IP and a port (for example 5909),
+   then press Start listening. The default 127.0.0.1 only accepts this PC.
+3. On the initiating PC enter the receiver's IP:port and Start encrypted chat.
+4. The receiver sees the authenticated ID/key and requested mode. Accept or
+   Reject explicitly. No unattended grant exists.
+5. Chat is turn-based in this build: send, receive a reply, then send again.
+   Reply/idle timeout is 120 seconds. Stop/disconnect closes the socket.
+
+No firewall configuration is automatic. Network/firewall setup for an actual
+second PC is the device owner's responsibility. Internet NAT traversal is absent.
+
+## File transfer
+
+Choose the receiving folder under File transfer on the receiver before starting
+its listener. On the sender choose a file, leave Resume ID empty for a new
+transfer and press Send file. The receiver must accept FileTransfer mode.
+
+The receive root must exist. Each offer is limited to 1 GiB. Flat Windows-safe
+names, 64 KiB chunk checksums and the final SHA-256 are verified. Existing target
+files are refused, not overwritten. A successful completion message follows
+the receiver's final integrity check and publication.
+
+An interruption retains an incomplete private transfer in that receive root.
+Keep the displayed transfer ID. Restart the receiver's listener, select the same
+source file and enter the ID to resume; another acceptance is required. Do not
+delete partial files if you intend to resume. There is no background retry.
+
+## Contacts, aliases and audit
+
+Trusted devices saves verified public pins and IP addresses locally. Saving an
+existing ID does not silently replace its pinned key. Device & diagnostics can
+save a local alias and verify incoming-session audit signatures and chain links.
+Audit contains operation metadata, not chat or file content. Its displayed chain
+head needs a separate trusted checkpoint to detect deletion of the entire tail.
+
+Data is under %LOCALAPPDATA%/SENSOR Technology/Remote. To isolate a test profile:
+
+```powershell
+.\SENSOR-Remote.exe --config C:\SensorTest\ProfileA
+```
+
+Identity keys remain tied to the current Windows user by DPAPI. A profile is not
+a cross-account portable credential backup. A second GUI for the same profile
+is refused. Nothing starts with Windows, and closing the app stops its work.
+
+## Not available yet
+
+Remote desktop viewing/control, UAC/login/unattended service, audio, clipboard,
+multi-monitor, printing/Auto Print, recording, VPN, Internet ID lookup, route
+failover, signed installer and signed updates are absent. The relay library is
+tested separately, not exposed by this window. See KNOWN_LIMITATIONS.md.

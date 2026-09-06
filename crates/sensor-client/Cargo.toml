@@ -1,0 +1,25 @@
+[package]
+name = "sensor-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "SENSOR-CLI"
+path = "src/main.rs"
+
+[dependencies]
+sensor-identity = { path = "../sensor-identity" }
+sensor-windows = { path = "../sensor-windows" }
+sensor-core = { path = "../sensor-core" }
+sensor-session = { path = "../sensor-session" }
+sensor-transport = { path = "../sensor-transport" }
+sensor-files = { path = "../sensor-files" }
+sensor-audit = { path = "../sensor-audit" }
+serde.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

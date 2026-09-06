@@ -1,50 +1,39 @@
 # Architecture
 
-## Trust boundaries
+SENSOR is a native Windows desktop product. `sensor-desktop` owns the visible
+egui/wgpu window, never a web view. It embeds the original supplied logo.
+No website or administrative web console was built in this iteration.
 
-1. **Endpoint**: the customer device and its local consent/permission policy.
-2. **Session transport**: direct or relayed encrypted bytes; relays must not
-   receive plaintext session content.
-3. **Control plane**: rendezvous, authentication, management, policy, and
-   audit metadata.
-4. **Operator client**: UI, renderer, input, files, and local printer access.
+## Implemented module boundaries
 
-The control plane may coordinate a connection, but endpoint authorization and
-session permissions must be enforced at the endpoint as well.
+| Crate | Responsibility |
+| --- | --- |
+| sensor-desktop | Native window; bounded UI/worker channels; contacts; visible consent |
+| sensor-client | Shared attended endpoint operations and SENSOR-CLI |
+| sensor-core | Validated nine-digit IDs and aliases |
+| sensor-identity | Locked atomic protected identity persistence |
+| sensor-windows | Actual current-user DPAPI implementation |
+| sensor-crypto | Ed25519/X25519/HKDF/ChaCha record primitives and zeroization |
+| sensor-protocol | Bounded version-2 frames and signed wire types |
+| sensor-session | Pinned handshake; consent and permission state |
+| sensor-transport | Deadline-bound TCP, mutual key confirmation, abort handle |
+| sensor-files | Root-confined resumable checksummed transfer, no overwrite |
+| sensor-audit | Signed chained local metadata audit |
+| sensor-relay | Preauthorized pair forwarding library; not integrated into UI |
 
-## Planned workspace
+## Current application flow
 
-```text
-sensor-core          domain types and invariants
-sensor-identity      device identity and OS-protected persistence
-sensor-crypto        composed cryptographic primitives
-sensor-protocol      versioned messages and capability negotiation
-sensor-transport     QUIC/TCP/proxy-independent framing and state
-sensor-rendezvous    registration and direct-path coordination
-sensor-relay         encrypted byte forwarding only
-sensor-media         capture, codecs, audio, recording
-sensor-files         resumable, integrity-checked transfer
-sensor-print         virtual printer and Auto Print
-sensor-input         policy-aware input messages
-sensor-session       consent, permissions, lifecycle, telemetry
-sensor-platform      cross-platform traits
-sensor-windows       Windows capture/service/secure-desktop backends
-sensor-service       privileged Windows service boundary
-sensor-client        desktop/mobile client shell
-sensor-management-api REST/API and policy service
-```
+Explicit Start -> direct TCP -> mutual pinned authentication/key confirmation
+-> local Accept/Reject -> chat OR file transfer -> close -> incoming audit.
 
-The first six crates are present. The remaining crates are planned boundaries,
-not claims of implemented functionality.
+Workers own sockets and operation state. UI owns only a cancellation handle,
+bounded events and one-shot consent/reply senders. Closing a prompt/window
+cannot implicitly grant access. Network I/O does not run on the render loop.
+One profile has one native window and one active job. No privileged service runs.
 
-## Connection lifecycle
+## Still planned
 
-```text
-register -> rendezvous -> direct-path candidates -> authenticated handshake
-         -> endpoint consent/ACL -> encrypted session -> telemetry/reconnect
-         -> explicit close -> audit record
-```
-
-Relay selection is a transport decision and must be exposed in connection
-diagnostics. A relay cannot be described as a direct connection.
-
+Rendezvous/NAT/proxy/direct-first fallback, Windows capture/video/input/audio,
+service/UAC/unattended operation, printing, VPN, enterprise control plane,
+signed packaging/update and other platforms remain missing. Existing documents
+for those systems are design plans, not implemented modules or release claims.

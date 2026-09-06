@@ -7,6 +7,7 @@
 
 use sensor_protocol::{Frame, ProtocolError, MAX_FRAME_SIZE};
 use thiserror::Error;
+pub mod connection;
 
 const LENGTH_PREFIX_SIZE: usize = 4;
 
@@ -45,9 +46,9 @@ pub fn decode_next(buffer: &mut Vec<u8>) -> Result<Option<Frame>, TransportError
     if buffer.len() < LENGTH_PREFIX_SIZE + length {
         return Ok(None);
     }
-    let payload = buffer[LENGTH_PREFIX_SIZE..LENGTH_PREFIX_SIZE + length].to_vec();
+    let frame = Frame::decode(&buffer[LENGTH_PREFIX_SIZE..LENGTH_PREFIX_SIZE + length])?;
     buffer.drain(..LENGTH_PREFIX_SIZE + length);
-    Ok(Some(Frame::decode(&payload)?))
+    Ok(Some(frame))
 }
 
 #[cfg(test)]

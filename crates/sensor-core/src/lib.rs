@@ -14,6 +14,7 @@ const DEVICE_ID_SPAN: u32 = 900_000_000;
 
 /// A persistent nine-digit SENSOR device identifier.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(try_from = "u32")]
 pub struct DeviceId(u32);
 
 impl DeviceId {
@@ -59,7 +60,15 @@ impl TryFrom<u32> for DeviceId {
 
 /// A user-facing alias, optionally qualified by a namespace.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct DeviceAlias(String);
+
+impl TryFrom<String> for DeviceAlias {
+    type Error = CoreError;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
 
 impl DeviceAlias {
     pub fn new(value: impl Into<String>) -> Result<Self, CoreError> {
@@ -136,5 +145,22 @@ mod tests {
     fn aliases_reject_whitespace() {
         assert!(DeviceAlias::new("support pc").is_err());
         assert!(DeviceAlias::new("support-pc").is_ok());
+    }
+
+    #[test]
+    fn deserialization_cannot_bypass_domain_validation() {
+        for value in [0_u32, 99_999_999, 1_000_000_000, u32::MAX] {
+            let bytes = postcard::to_allocvec(&value).unwrap();
+            assert!(postcard::from_bytes::<DeviceId>(&bytes).is_err());
+        }
+        for value in ["", "bad alias", "bad\nname"] {
+            let bytes = postcard::to_allocvec(value).unwrap();
+            assert!(postcard::from_bytes::<DeviceAlias>(&bytes).is_err());
+        }
+        let id = DeviceId::new(123_456_789).unwrap();
+        assert_eq!(
+            postcard::from_bytes::<DeviceId>(&postcard::to_allocvec(&id).unwrap()).unwrap(),
+            id
+        );
     }
 }

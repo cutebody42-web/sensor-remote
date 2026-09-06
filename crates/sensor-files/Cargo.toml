@@ -1,0 +1,19 @@
+[package]
+name = "sensor-files"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cap-std.workspace = true
+serde.workspace = true
+postcard.workspace = true
+sha2.workspace = true
+rand_core.workspace = true
+thiserror.workspace = true
+fs2.workspace = true
+sensor-session = { path = "../sensor-session" }
+
+[dev-dependencies]
+tempfile.workspace = true

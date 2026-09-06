@@ -1,29 +1,53 @@
-# Protocol
+# Protocol — wire version 2
 
-Protocol version 1 currently defines a bounded postcard envelope and a
-mutually authenticated hello exchange.
+Version 2 is intentionally incompatible with the earlier foundation envelope.
 
-## Handshake
+## Framing and limits
 
-1. Initiator sends its device ID, Ed25519 public key, X25519 ephemeral public
-   key, nonce, and Ed25519 signature over the canonical unsigned fields.
-2. Responder verifies the initiator signature, then sends its device ID,
-   Ed25519 public key, X25519 ephemeral public key, the echoed initiator nonce,
-   its own nonce, and a signature over both hello messages.
-3. Both sides derive the same transcript and X25519 shared secret.
-4. HKDF-SHA-256 derives independent initiator-to-responder and
-   responder-to-initiator keys.
-5. Application records are encrypted and authenticated before any remote
-   control capability is enabled.
+Each TCP message starts with a four-byte big-endian length. Its frame is:
+two-byte big-endian version (=2), one-byte type, four-byte big-endian payload
+length, then Postcard payload bytes. The length must match exactly.
 
-## Framing
+Maximum total frame is 1 MiB. Handshake frames are limited to 4096 bytes.
+Network lengths are checked before allocating. Schema decoding rejects trailing
+bytes. Reads/writes use an overall per-record deadline, not a new unlimited
+timeout after each fragment. Unknown versions/types are rejected.
 
-The transport framing uses a 32-bit big-endian payload length followed by one
-versioned frame. Lengths are bounded by 16 MiB and decoding is incremental.
+## Authentication
 
-## Compatibility
+1. Each endpoint is configured with the expected peer's ID and full Ed25519
+   public key, verified outside this connection.
+2. Client signs its version, ID, target ID/key, identity key, ephemeral X25519
+   key and random nonce. Responder validates its own target binding and the
+   configured peer pin, then verifies the signature.
+3. Server signs the client hello and its own version, ID, identity/ephemeral
+   keys, echoed client nonce and fresh server nonce. Client verifies the
+   configured server pin, signature and nonce.
+4. Non-contributory X25519 keys are rejected. HKDF-SHA-256 binds the signed
+   transcript and produces separate directional keys.
+5. Both sides exchange encrypted role-specific Finished records before any
+   application messages. Self-signed unknown peers never establish an app channel.
 
-Future versions must negotiate capabilities explicitly and must not silently
-interpret unknown security-sensitive fields. Protocol changes require updated
-test vectors and a review of signed transcript coverage.
+Hello signature/transcript domain labels retain their v1 labels; the signed
+version field is 2. Ordered record and Finished domains explicitly use v2.
 
+## Records and authorization
+
+Control frames carry an eight-byte big-endian sequence and AEAD ciphertext.
+The encrypted inner frame contains the actual typed application message.
+ChaCha20-Poly1305 binds fixed protocol AAD and the sequence nonce. The receiver
+requires the exact next sequence: duplicate, skipped and reordered records fail.
+Malformed, tampered or I/O-failed connections are poisoned and closed.
+
+A confirmed channel is authenticated, **not yet authorized**. The first operation
+requests Chat or FileTransfer. Local acceptance grants exactly that mode.
+Every operation requires its relevant permission at the receiving endpoint.
+Rejection or missing UI response grants nothing.
+
+FileOffer/Resume, Ready, Chunk/Progress, Commit/Complete, Pause and Cancel are
+typed operations. 64 KiB chunks and the complete manifest are SHA-256 checked.
+A transfer owner is the authenticated peer key. The desktop UI exposes
+reconnect/resume; Pause/Cancel are protocol operations, not GUI buttons yet.
+
+This custom composition has tests but has not received an independent protocol
+security review. Do not equate it with a reviewed TLS or Noise implementation.

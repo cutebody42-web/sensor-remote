@@ -1,4 +1,5 @@
 //! Mutual-authentication handshake and secure session state.
+pub mod permissions;
 
 use rand_core::{OsRng, RngCore};
 use sensor_core::DeviceId;
@@ -22,9 +23,20 @@ pub enum SessionError {
     UnsupportedVersion,
     #[error("handshake nonce does not match")]
     NonceMismatch,
+    #[error("peer does not match the expected device and pinned public key")]
+    PeerMismatch,
+}
+
+/// Obtained from an explicitly trusted registration or out-of-band exchange.
+/// A key supplied by the peer itself is not a trust decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExpectedPeer {
+    pub device_id: DeviceId,
+    pub public_key: [u8; 32],
 }
 
 pub struct InitiatorState {
+    expected: ExpectedPeer,
     ephemeral: EphemeralKeypair,
     client_hello: ClientHello,
 }
@@ -75,6 +87,7 @@ impl SecureSession {
 pub fn start_initiator(
     identity: &IdentityKeypair,
     device_id: DeviceId,
+    expected: ExpectedPeer,
 ) -> (InitiatorState, ClientHello) {
     let ephemeral = EphemeralKeypair::generate();
     let mut nonce = [0u8; 32];
@@ -82,6 +95,8 @@ pub fn start_initiator(
     let mut hello = ClientHello {
         version: PROTOCOL_VERSION,
         device_id,
+        target_device_id: expected.device_id,
+        target_identity_key: expected.public_key,
         identity_public_key: identity.public_key(),
         ephemeral_public_key: ephemeral.public_key(),
         nonce,
@@ -90,6 +105,7 @@ pub fn start_initiator(
     hello.signature =
         identity.sign(&client_signature_bytes(&hello).expect("hello fields are serializable"));
     let state = InitiatorState {
+        expected,
         ephemeral,
         client_hello: hello.clone(),
     };
@@ -100,9 +116,17 @@ pub fn accept_hello(
     identity: &IdentityKeypair,
     device_id: DeviceId,
     client_hello: ClientHello,
+    expected: ExpectedPeer,
 ) -> Result<(ResponderState, ServerHello), SessionError> {
     if client_hello.version != PROTOCOL_VERSION {
         return Err(SessionError::UnsupportedVersion);
+    }
+    if client_hello.device_id != expected.device_id
+        || client_hello.identity_public_key != expected.public_key
+        || client_hello.target_device_id != device_id
+        || client_hello.target_identity_key != identity.public_key()
+    {
+        return Err(SessionError::PeerMismatch);
     }
     sensor_crypto::IdentityKeypair::verify(
         &client_hello.identity_public_key,
@@ -140,6 +164,11 @@ pub fn finish_initiator(
     }
     if server_hello.client_nonce != state.client_hello.nonce {
         return Err(SessionError::NonceMismatch);
+    }
+    if server_hello.device_id != state.expected.device_id
+        || server_hello.identity_public_key != state.expected.public_key
+    {
+        return Err(SessionError::PeerMismatch);
     }
     sensor_crypto::IdentityKeypair::verify(
         &server_hello.identity_public_key,
@@ -188,9 +217,24 @@ mod tests {
         let initiator_id = DeviceId::new(111_222_333).unwrap();
         let responder_id = DeviceId::new(444_555_666).unwrap();
 
-        let (initiator_state, hello) = start_initiator(&initiator_identity, initiator_id);
-        let (responder_state, server_hello) =
-            accept_hello(&responder_identity, responder_id, hello).unwrap();
+        let (initiator_state, hello) = start_initiator(
+            &initiator_identity,
+            initiator_id,
+            ExpectedPeer {
+                device_id: responder_id,
+                public_key: responder_identity.public_key(),
+            },
+        );
+        let (responder_state, server_hello) = accept_hello(
+            &responder_identity,
+            responder_id,
+            hello,
+            ExpectedPeer {
+                device_id: initiator_id,
+                public_key: initiator_identity.public_key(),
+            },
+        )
+        .unwrap();
         let mut initiator = finish_initiator(initiator_state, server_hello).unwrap();
         let mut responder = finish_responder(responder_state).unwrap();
 
@@ -208,11 +252,26 @@ mod tests {
     #[test]
     fn altered_client_signature_is_rejected() {
         let identity = IdentityKeypair::from_seed([3u8; 32]);
-        let (_, mut hello) = start_initiator(&identity, DeviceId::new(111_222_333).unwrap());
-        hello.signature[0] ^= 1;
         let other = IdentityKeypair::from_seed([4u8; 32]);
+        let (_, mut hello) = start_initiator(
+            &identity,
+            DeviceId::new(111_222_333).unwrap(),
+            ExpectedPeer {
+                device_id: DeviceId::new(444_555_666).unwrap(),
+                public_key: other.public_key(),
+            },
+        );
+        hello.signature[0] ^= 1;
         assert!(matches!(
-            accept_hello(&other, DeviceId::new(444_555_666).unwrap(), hello),
+            accept_hello(
+                &other,
+                DeviceId::new(444_555_666).unwrap(),
+                hello,
+                ExpectedPeer {
+                    device_id: DeviceId::new(111_222_333).unwrap(),
+                    public_key: identity.public_key()
+                }
+            ),
             Err(SessionError::Crypto(CryptoError::SignatureVerification))
         ));
     }

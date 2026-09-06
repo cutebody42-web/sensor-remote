@@ -5,16 +5,21 @@
 //! implementation will be backed by DPAPI/credential isolation rather than a
 //! user-entered password or a process environment variable.
 
-use postcard::{from_bytes, to_allocvec};
+use postcard::to_allocvec;
 use rand_core::OsRng;
 use sensor_core::{DeviceAlias, DeviceId};
 use sensor_crypto::IdentityKeypair;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
 const IDENTITY_FILE_VERSION: u16 = 1;
+const MAX_IDENTITY_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Error)]
 pub enum IdentityError {
@@ -156,18 +161,51 @@ impl<P: KeyProtector> IdentityFileStore<P> {
     }
 
     pub fn load_or_create(&self) -> Result<DeviceIdentity, IdentityError> {
-        if self.path.exists() {
-            self.load()
-        } else {
-            let identity = DeviceIdentity::generate();
-            self.save(&identity)?;
-            Ok(identity)
+        let _guard = self.lock()?;
+        match self.load() {
+            Ok(identity) => Ok(identity),
+            Err(IdentityError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                let identity = DeviceIdentity::generate();
+                self.save_locked(&identity)?;
+                Ok(identity)
+            }
+            Err(error) => Err(error),
         }
     }
 
+    fn parent(&self) -> &Path {
+        self.path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+    }
+
+    fn lock(&self) -> Result<File, IdentityError> {
+        std::fs::create_dir_all(self.parent())?;
+        let mut lock_path = self.path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    }
+
     pub fn load(&self) -> Result<DeviceIdentity, IdentityError> {
-        let bytes = std::fs::read(&self.path)?;
-        let persisted: PersistedIdentity = from_bytes(&bytes)?;
+        let mut bytes = Vec::new();
+        File::open(&self.path)?
+            .take((MAX_IDENTITY_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_IDENTITY_BYTES {
+            return Err(IdentityError::Malformed);
+        }
+        let (persisted, trailing): (PersistedIdentity, _) = postcard::take_from_bytes(&bytes)?;
+        if !trailing.is_empty() {
+            return Err(IdentityError::Malformed);
+        }
         if persisted.version != IDENTITY_FILE_VERSION || persisted.protected_seed.is_empty() {
             return Err(IdentityError::Malformed);
         }
@@ -199,6 +237,11 @@ impl<P: KeyProtector> IdentityFileStore<P> {
     }
 
     pub fn save(&self, identity: &DeviceIdentity) -> Result<(), IdentityError> {
+        let _guard = self.lock()?;
+        self.save_locked(identity)
+    }
+
+    fn save_locked(&self, identity: &DeviceIdentity) -> Result<(), IdentityError> {
         let public_key = identity.keypair.public_key();
         let context = protection_context(
             IDENTITY_FILE_VERSION,
@@ -217,12 +260,15 @@ impl<P: KeyProtector> IdentityFileStore<P> {
             protected_seed: self.protector.protect(&*seed, &context)?,
         };
         let bytes = to_allocvec(&persisted)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if bytes.len() > MAX_IDENTITY_BYTES {
+            return Err(IdentityError::Malformed);
         }
-        let temporary = self.path.with_extension("tmp");
-        std::fs::write(&temporary, bytes)?;
-        std::fs::rename(temporary, &self.path)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(self.parent())?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&self.path)
+            .map_err(|e| IdentityError::Io(e.error))?;
         Ok(())
     }
 }
@@ -278,7 +324,7 @@ mod tests {
         store.save(&identity).unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        let mut persisted: PersistedIdentity = from_bytes(&bytes).unwrap();
+        let mut persisted: PersistedIdentity = postcard::from_bytes(&bytes).unwrap();
         persisted.alias = Some(DeviceAlias::new("tampered").unwrap());
         std::fs::write(&path, to_allocvec(&persisted).unwrap()).unwrap();
 

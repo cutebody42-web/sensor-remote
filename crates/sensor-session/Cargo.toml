@@ -11,7 +11,7 @@ sensor-core = { path = "../sensor-core" }
 sensor-crypto = { path = "../sensor-crypto" }
 sensor-protocol = { path = "../sensor-protocol" }
 thiserror.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
 rand_core.workspace = true
-

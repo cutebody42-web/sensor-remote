@@ -10,3 +10,5 @@ rand_core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+postcard.workspace = true

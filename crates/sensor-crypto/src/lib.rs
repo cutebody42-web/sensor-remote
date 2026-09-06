@@ -105,10 +105,16 @@ impl EphemeralKeypair {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
+#[derive(Eq, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct SessionKeys {
-    pub initiator_to_responder: [u8; 32],
-    pub responder_to_initiator: [u8; 32],
+    initiator_to_responder: [u8; 32],
+    responder_to_initiator: [u8; 32],
+}
+
+impl std::fmt::Debug for SessionKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SessionKeys([REDACTED])")
+    }
 }
 
 pub fn transcript_hash(transcript: &[u8]) -> [u8; 32] {
@@ -236,10 +242,11 @@ impl SecureChannel {
     }
 
     pub fn open(&mut self, record: &EncryptedRecord, aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        if self
-            .highest_received
-            .is_some_and(|highest| record.sequence <= highest)
-        {
+        let expected = match self.highest_received {
+            None => 0,
+            Some(value) => value.checked_add(1).ok_or(CryptoError::SequenceOverflow)?,
+        };
+        if record.sequence != expected {
             return Err(CryptoError::Replay(record.sequence));
         }
         let plaintext = self
@@ -295,5 +302,23 @@ mod tests {
             ephemeral.diffie_hellman(&[0u8; 32]),
             Err(CryptoError::InvalidPeerKey)
         ));
+    }
+
+    #[test]
+    fn rejected_records_do_not_advance_the_expected_sequence() {
+        let keys = derive_session_keys([17; 32], b"sequence-test").unwrap();
+        assert_eq!(format!("{keys:?}"), "SessionKeys([REDACTED])");
+        let mut sender = SecureChannel::initiator(&keys);
+        let mut receiver = SecureChannel::responder(&keys);
+        let first = sender.seal(b"bound-context", b"first").unwrap();
+        let second = sender.seal(b"bound-context", b"second").unwrap();
+        assert!(receiver.open(&second, b"bound-context").is_err());
+        assert!(receiver.open(&first, b"different-context").is_err());
+        let mut corrupted = first.clone();
+        corrupted.ciphertext[0] ^= 1;
+        assert!(receiver.open(&corrupted, b"bound-context").is_err());
+        assert_eq!(receiver.open(&first, b"bound-context").unwrap(), b"first");
+        assert!(receiver.open(&first, b"bound-context").is_err());
+        assert_eq!(receiver.open(&second, b"bound-context").unwrap(), b"second");
     }
 }

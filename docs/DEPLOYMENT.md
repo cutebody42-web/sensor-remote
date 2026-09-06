@@ -1,15 +1,18 @@
 # Deployment
 
-Deployment is not implemented yet.
+The current deliverable is an **unsigned portable Windows development EXE**,
+not an installer, MSI, Windows service or production release.
 
-The planned control-plane deployment contains independently deployable SENSOR
-Rendezvous, SENSOR Relay, SENSOR API, SENSOR Authentication, SENSOR Management
-Backend, and SENSOR Update Service components. Development will use Docker
-Compose; production will provide Kubernetes manifests, regional relays,
-Prometheus-compatible metrics, structured logs, secret injection, and database
-migrations.
+Open SENSOR-Remote.exe. Data defaults to
+`%LOCALAPPDATA%/SENSOR Technology/Remote`: protected identity, public contacts,
+incoming-session audit and a Received Files directory. Optional
+`--config <directory>` isolates a profile. DPAPI still belongs to the current
+Windows user; copying the profile does not create cross-account portability.
 
-No endpoint installer, Windows service, server image, or update package should
-be described as deployable until it has signed artifacts and installation
-tests.
+The app does not change firewall settings, install startup persistence,
+request elevation or configure unattended access. Closing it ends its sessions.
+Do not bypass Windows protection or deploy this publicly as trusted signed software.
 
+Server containers, regional deployments, organization authentication,
+installer/uninstaller, MSI, ADMX, signed updates/rollback and publication
+infrastructure remain unimplemented. No production signing key was supplied.

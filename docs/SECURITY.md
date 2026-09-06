@@ -1,39 +1,45 @@
-# Security Architecture
+# Security architecture — development status
 
-## Current guarantees
+## Implemented controls
 
-- Long-term device authentication uses Ed25519 signatures.
-- Session establishment uses ephemeral X25519 keys.
-- HKDF-SHA-256 derives separate directional keys from the authenticated
-  transcript.
-- Session records use ChaCha20-Poly1305 authenticated encryption.
-- Sequence numbers are bound into nonces and ordered replay is rejected.
-- Protocol frames have a maximum size and incremental decoding.
-- The identity file format requires a platform `KeyProtector`; it has no
-  plaintext-seed fallback. Public identity metadata is supplied as associated
-  context so a production protector must authenticate it with the seed.
+- Explicit out-of-band peer ID/public-key pins; strict Ed25519 signature checks.
+- Signed target binding, ephemeral X25519, transcript-bound directional HKDF
+  keys, mutual encrypted Finished messages, ChaCha20-Poly1305 ordered records.
+- Windows current-user DPAPI protects the identity seed and authenticates
+  its public metadata as optional entropy. No plaintext fallback.
+- Locked initialization, bounded identity reads and atomic same-directory save.
+- Visible local consent, separate chat/file permissions, no automatic listener
+  on launch, and local socket shutdown for Stop/window close.
+- Exact framed lengths, bounded network allocation, per-record deadlines,
+  no application messages before key confirmation.
+- Capability-scoped file directory, restricted Windows names, per-chunk and
+  whole-file checksums, peer-bound resume and no-clobber publication.
+- Signed, chained, exclusive-writer local audit, with narrow metadata-only
+  events. File content, chat content and secret keys are not audit fields.
 
-## Not yet guaranteed
+## Trust and remaining gaps
 
-The current crate-level code does not yet provide endpoint ACLs, attended
-consent, password/2FA handling, certificate/trust policy, secure update
-verification, relay deployment, or Windows OS secret storage. The application
-must not advertise these capabilities until their implementations and tests
-exist.
+The operator must verify the **full public key**, not merely the numeric ID.
+Relay payload encryption does not conceal handshake/routing metadata.
+DPAPI does not defend against code already executing as the same Windows user.
+Audit tail/whole-log deletion requires externally checkpointed chain heads to
+detect; the app currently displays a head but does not provide that service.
 
-## Key handling rules
+No unattended password feature, MFA, organization ACL service, SSO, privileged
+Windows service, signed updater or central audit retention exists.
+Current incoming-session audit is not a complete enterprise event history.
 
-- Private identity material is zeroized where the dependency supports it.
-- Passwords, session secrets, private keys, clipboard content, and document
-  content must never enter logs.
-- Session transcript hashes and public fingerprints may be logged only under
-  an explicit diagnostics policy.
-- Any future password-based feature must use a memory-hard KDF and rate
-  limiting; passwords must not become long-term transport keys.
+The cryptographic primitives come from established crates, but this application's
+composition has not been independently reviewed. No production security claim
+or audited-protocol claim is made. Do not expose this development host publicly.
 
-## Review gates
+## Primary implementation references
 
-Every new protocol field requires a signed-form decision. Every privileged
-Windows action requires a threat-model update and an end-to-end authorization
-test. Production release requires independent internal security review and
-passing fuzz/security suites.
+[Microsoft CryptProtectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)
+and [CryptUnprotectData](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptunprotectdata)
+document user scope, optional entropy and buffer ownership.
+[cap-std Dir](https://docs.rs/cap-std/latest/cap_std/fs/struct.Dir.html)
+documents directory-scoped filesystem operations.
+
+Production needs independent review, fuzz/DoS campaigns, OS-account ACL tests,
+key recovery design, artifact signing and the complete product release gate.

@@ -1,32 +1,35 @@
 # Build
 
-## Prerequisites
+## Windows prerequisites
 
-- Rust stable with `rustfmt` and `clippy` components.
-- Windows SDK and Visual Studio C++ build tools for future Windows crates.
-- Docker Desktop for future control-plane integration tests.
+- Rust 1.98.1 x86_64-pc-windows-msvc, pinned in rust-toolchain.toml.
+- Visual Studio C++ Build Tools with x64 MSVC and Windows SDK.
+- Direct3D 12 capable graphics environment for the current native renderer.
 
-## Verification commands
+Run from the repository:
 
-```text
-cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
+```powershell
+.\scripts\verify.ps1 -Release
 ```
 
-## Verified baseline
+Equivalent checks are `cargo fmt --all -- --check`,
+`cargo test --workspace --locked`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, and
+`cargo build --workspace --release --locked`.
 
-On 2026-09-06, the repository passed:
+Artifacts: `target/release/SENSOR-Remote.exe` (Windows-subsystem native GUI),
+`target/release/SENSOR-CLI.exe` (console endpoint).
+The build embeds the supplied logo, Windows icon/version resources and a
+PerMonitorV2, asInvoker manifest. It requests no administrator privileges.
 
-- `cargo fmt --all -- --check`
-- `cargo test --workspace --locked` (12 unit tests and all doc-test targets)
-- `cargo clippy --workspace --all-targets --locked -- -D warnings`
+Native rendering uses egui/eframe 0.33.3 with explicitly enabled wgpu DX12
+features; merely enabling eframe's wgpu feature does not select a native
+backend when default features are disabled.
 
-The verification used Rust 1.98.1 with the MSVC 14.44 toolset and Windows SDK
-10.0.26100.0.
+See [verification](VERIFICATION.md) for actual results. Hosted CI and the
+supported Windows VM matrix must still be run; local checks are not substitutes.
 
-## Dependency policy
-
-Keep cryptographic and media dependencies pinned through the lockfile once the
-first dependency resolution is run. Review licenses and security advisories
-before accepting new dependencies.
+To test optimized binaries, use `scripts/verify.ps1 -Release -ReleaseTests`.
+Packaging uses PowerShell 7: `scripts/package.ps1`. The destination must be new;
+existing packages are never overwritten. It collects dependency license files,
+source revision and executable SHA-256 sums. This is not publisher signing.

@@ -1,0 +1,38 @@
+[package]
+name = "sensor-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "SENSOR-Remote"
+path = "src/main.rs"
+
+[dependencies]
+sensor-client = { path = "../sensor-client" }
+sensor-core = { path = "../sensor-core" }
+sensor-identity = { path = "../sensor-identity" }
+sensor-windows = { path = "../sensor-windows" }
+sensor-session = { path = "../sensor-session" }
+sensor-transport = { path = "../sensor-transport" }
+sensor-files = { path = "../sensor-files" }
+sensor-audit = { path = "../sensor-audit" }
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+fs2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+wgpu = { version = "27", default-features = false, features = ["dx12", "wgsl"] }
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+rfd = "0.15"
+
+[build-dependencies]
+winresource = "0.1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "ico"] }
+
+[dev-dependencies]
+sha2.workspace = true
