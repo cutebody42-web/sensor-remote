@@ -1156,7 +1156,7 @@ impl App {
         card(ui, |ui| {
             ui.label(RichText::new("Release status: not production ready").strong());
             ui.label("Available here: persistent identity, attended encrypted chat, integrity-checked file send/receive, explicit reconnect-and-resume, local contacts, signed incoming-session audit.");
-            ui.label("Not implemented: remote screen/control, hardware video pipeline, unattended service, UAC/login screen, audio, clipboard, printing, Auto Print, VPN, signed installers/updates. Relay is currently library-only, not selectable in this window. No Internet ID lookup or NAT traversal.");
+            ui.label("Not implemented: unattended service, UAC/login screen, H.265/AV1, audio, clipboard, printing, Auto Print, VPN, signed installers/updates. Relay is currently library-only, not selectable in this window. No Internet ID lookup or NAT traversal. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop and remains a development feature.");
             ui.label(
                 RichText::new("Designed by ENG Mohamed Sayed • SENSOR TECHNOLOGY")
                     .size(12.0)
