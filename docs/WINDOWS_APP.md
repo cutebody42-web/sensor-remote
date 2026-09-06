@@ -2,16 +2,18 @@
 
 SENSOR-Remote.exe is the graphical application. SENSOR-CLI.exe is an optional
 console companion. Neither is a website. This is version 0.3.0 development,
-with attended remote desktop and an explicitly provisioned relay path
-implemented, but not the completed commercial-equivalent product.
+with attended remote desktop, an explicitly provisioned relay path, and a
+temporary Render Internet path implemented, but not the completed
+commercial-equivalent product.
 
 ## First launch
 
 1. Open SENSOR-Remote.exe. It runs as the current user, without elevation.
 2. Your persistent device ID appears. Copy the public key to the other device
    owner through a trusted channel and compare the full key.
-3. It is normal to see **Offline — No listener started**. There is no deployed
-   rendezvous service, so it cannot honestly advertise Internet ID connectivity.
+3. Without Render configuration it is normal to see **Offline — No listener
+   started**. With `SENSOR_MODE=RENDER_TEST` and `SENSOR_SERVER` configured,
+   the app registers an attended Internet listener while the window is open.
 
 The supplied JPEG logo is embedded unchanged; no extra image file or browser
 runtime is needed. Window rendering uses native egui/wgpu Direct3D 12.
@@ -36,7 +38,26 @@ endpoint-encrypted bytes; it does not replace endpoint authentication. See
 [RELAY.md](RELAY.md).
 
 No firewall configuration is automatic. Network/firewall setup for an actual
-second PC is the device owner's responsibility. Internet NAT traversal is absent.
+second PC is the device owner's responsibility. For Internet access, select
+**Render test (HTTPS/WSS)** or configure the environment variables below; no
+LAN address or port-forwarding is required.
+
+## Render Internet mode
+
+Deploy the temporary service using [the Render guide](../deployment/render/README.md),
+then configure the client before launching:
+
+```powershell
+$env:SENSOR_MODE = 'RENDER_TEST'
+$env:SENSOR_SERVER = 'https://<your-render-service>.onrender.com'
+.\SENSOR-Remote.exe
+```
+
+The app derives the WSS endpoint, registers the device with a signed
+challenge, retries during Render cold starts, and sends heartbeats while it is
+waiting for a peer. A receiver shows the normal visible SENSOR consent dialog
+for every incoming chat, file, view, or control request. Compare and save the
+peer's full public key after the first approved connection.
 
 ## File transfer
 

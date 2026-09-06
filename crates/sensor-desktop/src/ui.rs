@@ -4,7 +4,7 @@ use sensor_core::DeviceId;
 use sensor_desktop::{
     hex, parse_hex, peer,
     settings::{self, Contact},
-    worker::{self, Event, Job, RelayRoute, Route, Task},
+    worker::{self, Event, Job, RelayRoute, RenderRoute, Route, Task},
 };
 use sensor_files::TransferId;
 use sensor_identity::{DeviceIdentity, IdentityFileStore};
@@ -59,6 +59,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let contacts = settings::load(&config.join("contacts.json"))?;
     let receive = config.join("Received Files");
     std::fs::create_dir_all(&receive)?;
+    let render_server = std::env::var("SENSOR_SERVER")
+        .or_else(|_| std::env::var("SENSOR_WS"))
+        .ok()
+        .or(settings::load_network(&config.join("sensor-network.json"))?)
+        .or(settings::load_network(
+            &std::env::current_exe()?.with_file_name("sensor-network.json"),
+        )?)
+        .unwrap_or_default();
+    let render_mode = std::env::var("SENSOR_MODE")
+        .map(|mode| mode.eq_ignore_ascii_case("RENDER_TEST"))
+        .unwrap_or(!render_server.is_empty());
     let logo = image::load_from_memory(LOGO)?.to_rgba8();
     let icon = egui::IconData {
         rgba: logo.as_raw().clone(),
@@ -112,7 +123,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map(|a| a.as_str())
                 .unwrap_or("")
                 .to_owned();
-            Ok(Box::new(App {
+            let mut app = App {
                 _lock: lock,
                 config,
                 identity,
@@ -125,6 +136,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 use_relay: false,
                 relay_address: "127.0.0.1:5910".into(),
                 relay_key: String::new(),
+                use_render: render_mode,
+                render_server,
                 auto_accept: false,
                 allow_unpinned: false,
                 confirmed: false,
@@ -137,8 +150,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 status: "Offline • No listener started".into(),
                 notice: None,
                 job: None,
+                listener: None,
+                listener_enabled: false,
+                listener_route: None,
+                listener_busy: false,
+                listener_registered: false,
                 consent: None,
                 compose: None,
+                compose_listener: false,
                 draft: String::new(),
                 history: VecDeque::new(),
                 progress: None,
@@ -151,10 +170,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 remote_cursor: None,
                 remote_generation: 0,
                 remote_control: false,
+                remote_source_listener: false,
                 remote_buttons: [false; 3],
                 remote_focused: false,
                 remote_modifiers: [false; 3],
-            }))
+            };
+            if app.use_render && !app.render_server.trim().is_empty() {
+                app.start_render_listener();
+            }
+            Ok(Box::new(app))
         }),
     )?;
     Ok(())
@@ -165,6 +189,7 @@ struct ConsentPrompt {
     mode: Mode,
     reply: SyncSender<bool>,
     opened: Instant,
+    source_listener: bool,
 }
 struct App {
     _lock: File,
@@ -179,6 +204,8 @@ struct App {
     use_relay: bool,
     relay_address: String,
     relay_key: String,
+    use_render: bool,
+    render_server: String,
     auto_accept: bool,
     allow_unpinned: bool,
     confirmed: bool,
@@ -191,8 +218,14 @@ struct App {
     status: String,
     notice: Option<String>,
     job: Option<Job>,
+    listener: Option<Job>,
+    listener_enabled: bool,
+    listener_route: Option<Route>,
+    listener_busy: bool,
+    listener_registered: bool,
     consent: Option<ConsentPrompt>,
     compose: Option<SyncSender<Option<String>>>,
+    compose_listener: bool,
     draft: String,
     history: VecDeque<(bool, String)>,
     progress: Option<(u64, u64)>,
@@ -205,6 +238,7 @@ struct App {
     remote_cursor: Option<(i32, i32, bool)>,
     remote_generation: u64,
     remote_control: bool,
+    remote_source_listener: bool,
     remote_buttons: [bool; 3],
     remote_focused: bool,
     remote_modifiers: [bool; 3],
@@ -355,8 +389,13 @@ fn virtual_key(key: egui::Key) -> Option<u16> {
 }
 
 impl App {
+    fn session_active(&self) -> bool {
+        self.job.is_some() || self.listener.is_some()
+    }
+
     fn ready(&self) -> bool {
         self.job.is_none()
+            && !self.listener_busy
             && self.confirmed
             && (peer(&self.peer_id, &self.peer_key).is_ok()
                 || (self.allow_unpinned
@@ -366,6 +405,7 @@ impl App {
     }
     fn ready_host(&self) -> bool {
         self.job.is_none()
+            && self.listener.is_none()
             && self.confirmed
             && (self.ready()
                 || (self.allow_unpinned
@@ -412,8 +452,110 @@ impl App {
             relay_key: parse_hex(&self.relay_key)?,
         }))
     }
+    fn render_route(&self) -> Result<Route, String> {
+        let server = self.render_server.trim();
+        sensor_render::websocket_url(server).map_err(|e| e.to_string())?;
+        if server.is_empty() {
+            return Err(
+                "Enter SENSOR_SERVER, for example https://sensor-test.onrender.com.".into(),
+            );
+        }
+        if !(server.starts_with("https://")
+            || server.starts_with("http://")
+            || server.starts_with("wss://")
+            || server.starts_with("ws://"))
+        {
+            return Err("SENSOR_SERVER must start with https:// or wss://.".into());
+        }
+        Ok(Route::Render(RenderRoute {
+            server: server.to_owned(),
+        }))
+    }
+    fn spawn_render_listener(&mut self, route: Route) {
+        if self.listener.is_some() {
+            return;
+        }
+        let peer = match DeviceId::new(100_000_000) {
+            Some(device_id) => ExpectedPeer {
+                device_id,
+                public_key: [0; 32],
+            },
+            None => {
+                self.listener_enabled = false;
+                self.notice = Some("Could not create the Render listener identity.".into());
+                return;
+            }
+        };
+        self.listener_route = Some(route.clone());
+        self.listener_registered = false;
+        self.status = "Connecting to SENSOR service...".into();
+        self.listener = Some(worker::start(
+            Task::Host {
+                route,
+                receive_dir: self.receive.clone(),
+                auto_accept: false,
+                accept_any: true,
+            },
+            self.identity.clone(),
+            peer,
+            self.config.clone(),
+        ));
+    }
+    fn start_render_listener(&mut self) {
+        match self.render_route() {
+            Ok(route) => {
+                if let Err(error) = settings::save_network(
+                    &self.config.join("sensor-network.json"),
+                    &self.render_server,
+                ) {
+                    self.notice = Some(error);
+                    return;
+                }
+                self.listener_enabled = true;
+                self.notice = None;
+                self.spawn_render_listener(route);
+            }
+            Err(error) => {
+                self.listener_enabled = false;
+                self.notice = Some(error);
+            }
+        }
+    }
+    fn clear_session_state(&mut self, source_listener: bool) {
+        if source_listener {
+            self.listener_busy = false;
+        }
+        if self
+            .consent
+            .as_ref()
+            .is_some_and(|prompt| prompt.source_listener == source_listener)
+        {
+            if let Some(prompt) = self.consent.take() {
+                let _ = prompt.reply.try_send(false);
+            }
+        }
+        if self.compose.is_some() && self.compose_listener == source_listener {
+            if let Some(sender) = self.compose.take() {
+                let _ = sender.try_send(None);
+            }
+        }
+        if self.remote_source_listener == source_listener {
+            self.remote_frame = None;
+            self.remote_texture = None;
+            self.remote_format = None;
+            self.remote_displays.clear();
+            self.remote_cursor = None;
+            self.remote_focused = false;
+            self.remote_buttons = [false; 3];
+            self.remote_modifiers = [false; 3];
+            self.remote_control = false;
+            self.remote_source_listener = false;
+        }
+    }
     fn outbound_route(&self) -> Result<Route, String> {
-        if self.use_relay {
+        if self.use_render {
+            self.render_route()
+        } else if self.use_relay {
             self.relay_route()
         } else {
             Ok(Route::Direct(self.address.trim().parse().map_err(
@@ -422,7 +564,9 @@ impl App {
         }
     }
     fn listen_route(&self) -> Result<Route, String> {
-        if self.use_relay {
+        if self.use_render {
+            self.render_route()
+        } else if self.use_relay {
             self.relay_route()
         } else {
             Ok(Route::Direct(self.bind.trim().parse().map_err(|_| {
@@ -447,6 +591,7 @@ impl App {
         self.remote_control = matches!(&task, Task::Remote { control: true, .. });
         if matches!(&task, Task::Remote { .. }) {
             self.page = Page::Remote;
+            self.remote_source_listener = false;
             self.remote_frame = None;
             self.remote_texture = None;
             self.remote_displays.clear();
@@ -500,6 +645,12 @@ impl App {
         }
         if let Some(job) = &self.job {
             job.control.stop();
+        }
+        self.listener_enabled = false;
+        if let Some(listener) = &self.listener {
+            listener.control.stop();
+        }
+        if self.job.is_some() || self.listener.is_some() {
             self.status = "Stopping session...".into();
         }
     }
@@ -511,45 +662,100 @@ impl App {
     }
     fn poll(&mut self) {
         let mut events = Vec::new();
-        let mut disconnected = false;
+        let mut disconnected_job = false;
+        let mut disconnected_listener = false;
         if let Some(job) = &self.job {
             loop {
                 match job.events.try_recv() {
-                    Ok(event) => events.push(event),
+                    Ok(event) => events.push((false, event)),
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
+                        disconnected_job = true;
                         break;
                     }
                 }
             }
         }
-        for event in events {
-            match event {
-                Event::Status(status) => self.status = status,
-                Event::Consent(peer, mode, reply) => {
-                    if matches!(mode, Mode::ScreenView | Mode::RemoteControl) {
-                        self.page = Page::Remote;
-                        self.remote_control = matches!(mode, Mode::RemoteControl);
+        if let Some(listener) = &self.listener {
+            loop {
+                match listener.events.try_recv() {
+                    Ok(event) => events.push((true, event)),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        disconnected_listener = true;
+                        break;
                     }
-                    self.consent = Some(ConsentPrompt {
-                        peer,
-                        mode,
-                        reply,
-                        opened: Instant::now(),
-                    })
                 }
-                Event::Chat(text) => self.push_chat(false, text),
+            }
+        }
+        for (source_listener, event) in events {
+            match event {
+                Event::Online(online) => {
+                    if source_listener {
+                        self.listener_registered = online;
+                        if self.job.is_none() {
+                            self.status = if online {
+                                "Online • Ready for an attended connection"
+                            } else {
+                                "Connecting • Internet listener"
+                            }
+                            .into();
+                        }
+                    }
+                }
+                Event::Status(status) => {
+                    if !source_listener || self.job.is_none() {
+                        self.status = status;
+                    }
+                }
+                Event::Consent(peer, mode, reply) => {
+                    if self.consent.is_some()
+                        || (source_listener && (self.job.is_some() || self.listener_busy))
+                    {
+                        let _ = reply.try_send(false);
+                    } else {
+                        if source_listener {
+                            self.listener_busy = true;
+                        }
+                        if matches!(mode, Mode::ScreenView | Mode::RemoteControl) {
+                            self.page = Page::Remote;
+                            self.remote_control = matches!(mode, Mode::RemoteControl);
+                            self.remote_source_listener = source_listener;
+                        }
+                        self.consent = Some(ConsentPrompt {
+                            peer,
+                            mode,
+                            reply,
+                            opened: Instant::now(),
+                            source_listener,
+                        });
+                    }
+                }
+                Event::Chat(text) => {
+                    if self.job.is_some() || self.listener.is_some() {
+                        self.push_chat(false, text);
+                    }
+                }
                 Event::Compose(sender) => {
-                    self.compose = Some(sender);
-                    self.page = Page::Chat;
+                    if self.compose.is_none() && !(source_listener && self.job.is_some()) {
+                        self.compose = Some(sender);
+                        self.compose_listener = source_listener;
+                        self.page = Page::Chat;
+                    } else {
+                        let _ = sender.try_send(None);
+                    }
                 }
-                Event::RemoteDisplays(displays) => self.remote_displays = displays,
+                Event::RemoteDisplays(displays) => {
+                    self.remote_source_listener = source_listener;
+                    self.remote_displays = displays;
+                }
                 Event::RemoteFormat(format) => {
+                    self.remote_source_listener = source_listener;
                     self.remote_generation = format.generation;
                     self.remote_format = Some(format);
                 }
                 Event::RemoteCursor { x, y, visible } => {
+                    self.remote_source_listener = source_listener;
                     self.remote_cursor = Some((x, y, visible));
                 }
                 Event::Progress { id, bytes, total } => {
@@ -559,50 +765,96 @@ impl App {
                     }
                 }
                 Event::Finished(result) => {
-                    let stopped = self.job.as_ref().is_some_and(|j| j.control.is_stopped());
-                    self.job = None;
-                    self.consent = None;
-                    self.compose = None;
-                    self.started = None;
-                    self.remote_frame = None;
-                    self.remote_texture = None;
-                    self.remote_format = None;
-                    self.remote_displays.clear();
-                    self.remote_focused = false;
-                    self.remote_buttons = [false; 3];
-                    self.remote_modifiers = [false; 3];
-                    self.status = "Offline • Session closed".into();
-                    self.notice = Some(match result {
-                        Ok(message) => message,
-                        Err(_) if stopped => "Stopped locally. Incomplete files are retained for an explicitly accepted resume.".into(),
-                        Err(error) => format!("Session failed: {error}"),
-                    });
+                    if source_listener {
+                        disconnected_listener = false;
+                        self.listener_registered = false;
+                        let stopped = self
+                            .listener
+                            .as_ref()
+                            .is_some_and(|listener| listener.control.is_stopped());
+                        self.listener = None;
+                        self.listener_busy = false;
+                        self.clear_session_state(true);
+                        if self.listener_enabled && !stopped {
+                            if let Some(route) = self.listener_route.clone() {
+                                self.spawn_render_listener(route);
+                            }
+                        } else if self.job.is_none() {
+                            self.status = "Offline • Render listener stopped".into();
+                            if let Err(error) = result {
+                                self.notice = Some(format!("Render listener failed: {error}"));
+                            }
+                        }
+                    } else {
+                        let stopped = self
+                            .job
+                            .as_ref()
+                            .is_some_and(|job| job.control.is_stopped());
+                        self.job = None;
+                        self.clear_session_state(false);
+                        self.started = None;
+                        if self.listener_registered {
+                            self.status = "Online • Listener ready".into();
+                        } else {
+                            self.status = "Offline • Session closed".into();
+                        }
+                        self.notice = Some(match result {
+                            Ok(message) => message,
+                            Err(_) if stopped => "Stopped locally. Incomplete files are retained for an explicitly accepted resume.".into(),
+                            Err(error) => format!("Session failed: {error}"),
+                        });
+                    }
                 }
             }
         }
-        if disconnected && self.job.is_some() {
+        if disconnected_job && self.job.is_some() {
             // A worker panic cannot leave the UI falsely reporting an active session.
-            self.stop();
             self.job = None;
+            self.clear_session_state(false);
             self.started = None;
-            self.status = "Offline • Worker stopped unexpectedly".into();
+            self.status = if self.listener_registered {
+                "Online • Listener ready".into()
+            } else {
+                "Offline • Worker stopped unexpectedly".into()
+            };
+            self.notice = Some("The foreground worker stopped unexpectedly.".into());
         }
-        if let Some(job) = &self.job {
-            if let Some(frame) = job.control.latest_frame() {
+        if disconnected_listener && self.listener.is_some() {
+            self.listener_registered = false;
+            self.listener = None;
+            self.listener_busy = false;
+            self.clear_session_state(true);
+            if self.listener_enabled {
+                if let Some(route) = self.listener_route.clone() {
+                    self.spawn_render_listener(route);
+                }
+            } else if self.job.is_none() {
+                self.status = "Offline • Render listener stopped".into();
+            }
+        }
+        let control = if self.remote_source_listener {
+            self.listener.as_ref().map(|job| job.control.clone())
+        } else {
+            self.job.as_ref().map(|job| job.control.clone())
+        };
+        if let Some(control) = control {
+            if let Some(frame) = control.latest_frame() {
                 self.remote_frame = Some(frame);
             }
         }
     }
 
     fn send_remote(&mut self, event: Input) -> bool {
-        let Some(job) = &self.job else {
+        let control = if self.remote_source_listener {
+            self.listener.as_ref().map(|job| job.control.clone())
+        } else {
+            self.job.as_ref().map(|job| job.control.clone())
+        };
+        let Some(control) = control else {
             return false;
         };
         let generation = self.remote_generation;
-        if job
-            .control
-            .send_remote(DesktopMessage::Input { generation, event })
-        {
+        if control.send_remote(DesktopMessage::Input { generation, event }) {
             true
         } else {
             self.notice = Some(
@@ -612,7 +864,7 @@ impl App {
         }
     }
     fn release_remote_input(&mut self) {
-        if self.remote_control && self.job.is_some() {
+        if self.remote_control && (self.job.is_some() || self.listener.is_some()) {
             let _ = self.send_remote(Input::ReleaseAll);
         }
         self.remote_buttons = [false; 3];
@@ -620,13 +872,15 @@ impl App {
         self.remote_modifiers = [false; 3];
     }
     fn select_remote_display(&mut self, index: u32) -> bool {
-        let Some(job) = &self.job else {
+        let control = if self.remote_source_listener {
+            self.listener.as_ref().map(|job| job.control.clone())
+        } else {
+            self.job.as_ref().map(|job| job.control.clone())
+        };
+        let Some(control) = control else {
             return false;
         };
-        if job
-            .control
-            .send_remote(DesktopMessage::SelectDisplay(index))
-        {
+        if control.send_remote(DesktopMessage::SelectDisplay(index)) {
             true
         } else {
             self.notice = Some("The remote monitor-selection channel is unavailable.".into());
@@ -696,10 +950,37 @@ impl App {
             ui.separator();
             ui.label(RichText::new("CONNECTION PATH").strong());
             ui.horizontal(|ui| {
-                ui.radio_value(&mut self.use_relay, false, "Direct TCP");
-                ui.radio_value(&mut self.use_relay, true, "Provisioned relay");
+                if ui
+                    .radio(!self.use_relay && !self.use_render, "Direct TCP")
+                    .clicked()
+                {
+                    self.use_relay = false;
+                    self.use_render = false;
+                }
+                if ui
+                    .radio(self.use_relay && !self.use_render, "Provisioned relay")
+                    .clicked()
+                {
+                    self.use_relay = true;
+                    self.use_render = false;
+                }
+                if ui
+                    .radio(self.use_render, "Render test (HTTPS/WSS)")
+                    .clicked()
+                {
+                    self.use_render = true;
+                    self.use_relay = false;
+                }
             });
-            if self.use_relay {
+            if self.use_render {
+                field(
+                    ui,
+                    "SENSOR SERVER",
+                    &mut self.render_server,
+                    "https://sensor-test.onrender.com",
+                );
+                ui.label(RichText::new("The temporary cloud path registers this device by ID and relays the already-encrypted SENSOR stream over WSS. Render Free may cold-start; SENSOR retries are handled by the service profile.").size(12.0).color(MUTED));
+            } else if self.use_relay {
                 field(
                     ui,
                     "RELAY IP : PORT",
@@ -717,7 +998,13 @@ impl App {
             ui.separator();
             ui.columns(2, |columns| {
                 columns[0].label(RichText::new("Connect to a device").strong());
-                if !self.use_relay {
+                if self.use_render {
+                    columns[0].label(
+                        RichText::new("The Render server above is used for Device ID lookup and WSS relay.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                } else if !self.use_relay {
                     field(
                         &mut columns[0],
                         "REMOTE IP : PORT",
@@ -763,7 +1050,13 @@ impl App {
                     }
                 }
                 columns[1].label(RichText::new("Receive a connection").strong());
-                if !self.use_relay {
+                if self.use_render {
+                    columns[1].label(
+                        RichText::new("This endpoint waits for its online Device ID session through Render WSS.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                } else if !self.use_relay {
                     field(
                         &mut columns[1],
                         "LOCAL LISTEN IP : PORT",
@@ -790,15 +1083,34 @@ impl App {
                     .size(12.0)
                     .color(MUTED),
                 );
-                if primary(&mut columns[1], "Start listening", self.ready_host()) {
-                    match self.listen_route() {
-                        Ok(route) => self.begin(Task::Host {
-                            route,
-                            receive_dir: self.receive.clone(),
-                            auto_accept: self.auto_accept,
-                            accept_any: self.allow_unpinned && self.peer_key.trim().is_empty(),
-                        }),
-                        Err(error) => self.notice = Some(error),
+                let can_start_listener = if self.use_render {
+                    self.listener.is_none() && self.render_route().is_ok()
+                } else {
+                    self.ready_host()
+                };
+                if primary(
+                    &mut columns[1],
+                    if self.use_render && self.listener_registered {
+                        "Online • listening"
+                    } else if self.use_render && self.listener.is_some() {
+                        "Connecting..."
+                    } else {
+                        "Start listening"
+                    },
+                    can_start_listener,
+                ) {
+                    if self.use_render {
+                        self.start_render_listener();
+                    } else {
+                        match self.listen_route() {
+                            Ok(route) => self.begin(Task::Host {
+                                route,
+                                receive_dir: self.receive.clone(),
+                                auto_accept: self.auto_accept,
+                                accept_any: self.allow_unpinned && self.peer_key.trim().is_empty(),
+                            }),
+                            Err(error) => self.notice = Some(error),
+                        }
                     }
                 }
             });
@@ -815,7 +1127,13 @@ impl App {
         card(ui, |ui| {
             ui.add_enabled_ui(self.job.is_none(), |ui| {
                 self.peer_form(ui);
-                if !self.use_relay {
+                if self.use_render {
+                    ui.label(
+                        RichText::new("Render HTTPS/WSS is selected on Connect; the SENSOR server above is used for this transfer.")
+                            .size(12.0)
+                            .color(MUTED),
+                    );
+                } else if !self.use_relay {
                     field(
                         ui,
                         "REMOTE IP : PORT",
@@ -1274,7 +1592,7 @@ impl App {
             ));
             ui.label(format!("Profile directory: {}", self.config.display()));
             ui.label(format!("Network: {}", self.status));
-            ui.label("Transport in this window: direct TCP or a provisioned SENSOR relay. Mutual pinned-key authentication; X25519 + Ed25519 + ChaCha20-Poly1305.");
+            ui.label("Transport in this window: direct TCP, provisioned relay, or Render HTTPS/WSS. Mutual pinned-key authentication; X25519 + Ed25519 + ChaCha20-Poly1305.");
             ui.label("Window rendering: native egui / wgpu. No browser or WebView.");
             ui.add_enabled_ui(self.job.is_none(), |ui| {
                 field(
@@ -1328,7 +1646,7 @@ impl App {
         card(ui, |ui| {
             ui.label(RichText::new("Release status: not production ready").strong());
             ui.label("Available here: persistent identity, attended encrypted chat, integrity-checked file send/receive, explicit reconnect-and-resume, local contacts, signed incoming-session audit.");
-            ui.label("Not implemented: installed Windows service, UAC/login screen, H.265/AV1, audio, clipboard, printing, Auto Print, VPN, signed installers/updates, Internet ID lookup, and NAT traversal. Provisioned relay routing is available when both endpoints and the relay are configured. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
+            ui.label("Not implemented: installed Windows service, UAC/login screen, H.265/AV1, audio, clipboard, printing, Auto Print, VPN, signed installers/updates, durable accounts, NAT traversal, and direct/relay failover. Temporary Render Internet routing is available when SENSOR_MODE=RENDER_TEST and SENSOR_SERVER are configured. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
             ui.label(
                 RichText::new("Designed by ENG Mohamed Sayed • SENSOR TECHNOLOGY")
                     .size(12.0)
@@ -1341,14 +1659,14 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
-        if self.job.is_some() {
+        if self.session_active() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
         egui::TopBottomPanel::bottom("status-bar")
             .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(12))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.colored_label(if self.job.is_some() { TEAL } else { MUTED }, "●");
+                    ui.colored_label(if self.session_active() { TEAL } else { MUTED }, "●");
                     ui.label(RichText::new(&self.status).size(12.0));
                     if let Some(started) = self.started {
                         ui.label(
@@ -1423,7 +1741,7 @@ impl eframe::App for App {
                     .color(MUTED),
                 );
                 ui.add_space(12.0);
-                if self.job.is_some()
+                if self.session_active()
                     && ui
                         .add_sized(
                             [178.0, 40.0],

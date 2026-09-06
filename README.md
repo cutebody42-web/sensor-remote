@@ -2,8 +2,9 @@
 
 SENSOR TECHNOLOGY · Designed by ENG Mohamed Sayed.
 
-Version **0.3.0 — Windows attended remote-desktop development build**. It is not
-yet a production AnyDesk replacement.
+Version **0.3.0 — Windows attended remote-desktop build with Render Internet
+transport**. The Render service is a temporary proof-of-concept deployment;
+this is not yet a production AnyDesk replacement.
 
 ## Windows app, not a website
 
@@ -13,9 +14,11 @@ There is no HTML interface, browser, WebView, local web server, or hosted site.
 
 Open the EXE to see the persistent device ID, copy its public key, configure
 an explicitly trusted peer, and start attended chat, file transfer, or remote
-desktop viewing/control.
-The app starts offline. It does not install a service, open a listener,
-modify the firewall, or configure unattended access on startup.
+desktop viewing/control. With `SENSOR_MODE=RENDER_TEST` and
+`SENSOR_SERVER=https://<your-service>.onrender.com`, the native app keeps an
+Internet WSS listener registered while it is open. It remains a Windows app:
+there is no HTML interface, browser dependency, or hosted website endpoint on
+the client.
 
 ## Implemented and testable
 
@@ -36,28 +39,34 @@ modify the firewall, or configure unattended access on startup.
 - A provisioned two-peer authenticated relay path. `sensor-relay.exe` is a
   self-hostable single-pair forwarder; the GUI can use it when both endpoints
   are configured with its address and public key. Endpoint application records
-  remain encrypted end-to-end. Automatic Internet ID lookup, NAT traversal,
-  and direct/relay failover are not included.
+  remain encrypted end-to-end.
+- Temporary Render Internet transport: signed device registration, ephemeral
+  online presence lookup, token-authenticated pairing, heartbeat, reconnect
+  backoff, HTTPS health endpoint, and opaque binary WSS relay. The service is
+  implemented by the native `sensor-rendezvous` binary in
+  `crates/sensor-rendezvous`.
 
 ## Important remaining work
 
-The attended screen/control path and explicitly provisioned relay path are
-implemented, but the complete product requested in the brief is not finished.
-Installed unattended service/login/UAC, audio, clipboard, printing/Auto Print,
-recording, VPN/tunnels, discovery/Internet ID, NAT traversal, enterprise
-administration, installers, signed updates, and cross-machine/Internet
-certification remain.
+The attended screen/control path, provisioned relay path, and temporary Render
+Internet path are implemented, but the complete product requested in the brief
+is not finished. Installed unattended service/login/UAC, audio, clipboard,
+printing/Auto Print, recording, VPN/tunnels, durable accounts/device
+directory, NAT traversal, direct/relay failover, enterprise administration,
+installers, signed updates, and cross-machine/Internet certification remain.
 
 Actual DXGI capture and SendInput testing must be performed on an unlocked
 interactive desktop. The current locked test session has verified the code's
 permission gates and codec path, but not a real two-computer session.
-See [parity](docs/PARITY_MATRIX.md) and [limitations](docs/KNOWN_LIMITATIONS.md).
+See [parity](docs/PARITY_MATRIX.md), [deployment](docs/DEPLOYMENT.md), and
+[limitations](docs/KNOWN_LIMITATIONS.md).
 
 ## Run and build
 
 See [Windows guide](docs/WINDOWS_APP.md). The portable development executables
 are `SENSOR-Remote.exe` (desktop), `SENSOR-CLI.exe` (console endpoint), and
-`sensor-relay.exe` (self-hosted provisioned relay).
+`sensor-relay.exe` (self-hosted provisioned relay). `sensor-rendezvous` is the
+Render/Linux Web Service binary built by `deployment/render/Dockerfile`.
 They are unsigned: there is no supplied publisher signing certificate.
 Running this development build requires Direct3D 12 and the Visual C++ x64
 runtime (VCRUNTIME140.dll). Neither an installer nor a runtime installer is bundled.
@@ -70,3 +79,15 @@ With Rust 1.98.1, MSVC build tools and Windows SDK installed:
 
 Sources live under `crates/`; the exact dependency graph is in `Cargo.lock`.
 [Verification](docs/VERIFICATION.md) records actual checks, not release promises.
+
+## Temporary Internet setup
+
+The repository includes [render.yaml](render.yaml), the Render Dockerfile, and
+an [Internet deployment guide](deployment/render/README.md). Deploy the
+Blueprint on Render Free, copy its HTTPS service URL, and set `SENSOR_SERVER`
+to that URL on both Windows PCs. In the Windows package,
+`Start-SENSOR-Internet.cmd` prompts for that URL and starts the native app with
+the correct environment. The first connection still requires verified
+device keys and visible local approval. Render Free may cold-start and its
+in-memory presence directory is intentionally non-durable; this is documented
+and is not a substitute for production account infrastructure.

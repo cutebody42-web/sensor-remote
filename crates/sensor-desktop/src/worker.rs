@@ -4,6 +4,10 @@ use sensor_files::{Receiver as FileReceiver, TransferId};
 use sensor_identity::DeviceIdentity;
 use sensor_media::{DecodedFrame, DesktopMessage, Display, VideoFormat};
 use sensor_relay::join as join_relay;
+use sensor_render::{
+    accept_with_control as accept_render, connect_with_control as connect_render,
+    CONNECT_TIMEOUT as RENDER_TIMEOUT,
+};
 use sensor_session::ExpectedPeer;
 use sensor_transport::connection::{ConnectionAbort, SecureConnection, DEFAULT_TIMEOUT};
 use std::{
@@ -25,6 +29,7 @@ use sensor_session::permissions::{Consent, Permissions};
 use sensor_windows::{codec, desktop, input};
 
 pub enum Event {
+    Online(bool),
     Status(String),
     Consent(ExpectedPeer, Mode, SyncSender<bool>),
     Chat(String),
@@ -51,9 +56,15 @@ pub struct RelayRoute {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderRoute {
+    pub server: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Route {
     Direct(SocketAddr),
     Relay(RelayRoute),
+    Render(RenderRoute),
 }
 
 impl Route {
@@ -61,6 +72,7 @@ impl Route {
         match self {
             Self::Direct(_) => "Direct TCP",
             Self::Relay(_) => "Secure relay",
+            Self::Render(_) => "Render HTTPS/WSS",
         }
     }
 }
@@ -221,6 +233,7 @@ struct Interaction<'a> {
     control: &'a Control,
     progress_at: Instant,
     auto_accept: bool,
+    route_label: &'static str,
 }
 impl LocalInteraction for Interaction<'_> {
     fn accept(&mut self, peer: ExpectedPeer, mode: Mode) -> bool {
@@ -236,8 +249,8 @@ impl LocalInteraction for Interaction<'_> {
             && wait_reply(receiver, self.control).unwrap_or(false);
         let _ = self.events.send(Event::Status(if accepted {
             format!(
-                "Active {mode:?} session • peer {} • Direct TCP • ChaCha20-Poly1305",
-                peer.device_id
+                "Active {mode:?} session • peer {} • {} • ChaCha20-Poly1305",
+                peer.device_id, self.route_label
             )
         } else {
             "Session rejected locally.".into()
@@ -265,7 +278,12 @@ impl LocalInteraction for Interaction<'_> {
         connection: &mut SecureConnection,
         consent: &sensor_session::permissions::Consent,
     ) -> Result<(), sensor_client::EndpointError> {
-        host_desktop(connection, consent, self.control)
+        host_desktop(
+            connection,
+            consent,
+            self.control,
+            self.route_label == "Render HTTPS/WSS",
+        )
     }
 }
 fn compose(events: &SyncSender<Event>, control: &Control) -> Option<String> {
@@ -274,7 +292,12 @@ fn compose(events: &SyncSender<Event>, control: &Control) -> Option<String> {
     wait_reply(receiver, control).flatten()
 }
 
-fn connect_route(route: &Route, identity: &DeviceIdentity) -> Result<TcpStream, String> {
+fn connect_route(
+    route: &Route,
+    identity: &DeviceIdentity,
+    peer: ExpectedPeer,
+    control: &Control,
+) -> Result<TcpStream, String> {
     match route {
         Route::Direct(address) => {
             TcpStream::connect_timeout(address, DEFAULT_TIMEOUT).map_err(|error| error.to_string())
@@ -286,6 +309,12 @@ fn connect_route(route: &Route, identity: &DeviceIdentity) -> Result<TcpStream, 
             DEFAULT_TIMEOUT,
         )
         .map_err(|error| error.to_string()),
+        Route::Render(render) => {
+            connect_render(&render.server, identity, peer, RENDER_TIMEOUT, &|| {
+                control.is_stopped()
+            })
+            .map_err(|error| error.to_string())
+        }
     }
 }
 
@@ -331,6 +360,14 @@ fn execute(
                 ))?;
                 None
             }
+            Route::Render(render) => {
+                status(format!(
+                    "Registering Device ID {} through Render HTTPS/WSS • {}",
+                    identity.device_id(),
+                    render.server
+                ))?;
+                None
+            }
         };
         let mut connection = loop {
             let stream = match &listener {
@@ -357,6 +394,40 @@ fn execute(
                         DEFAULT_TIMEOUT,
                     )
                     .map_err(|error| error.to_string())?,
+                    Route::Render(render) => {
+                        let mut delay = Duration::from_secs(1);
+                        loop {
+                            let _ = events.send(Event::Online(false));
+                            match accept_render(
+                                &render.server,
+                                &identity,
+                                RENDER_TIMEOUT,
+                                &|| control.is_stopped(),
+                                &|| {
+                                    let _ = events.send(Event::Online(true));
+                                },
+                            ) {
+                                Ok(stream) => {
+                                    let _ = events.send(Event::Online(false));
+                                    break stream;
+                                }
+                                Err(_) if control.is_stopped() => {
+                                    return Ok("Internet listener stopped.".into())
+                                }
+                                Err(error) => {
+                                    status(format!("Internet connection interrupted ({error}). Retrying in {}s...", delay.as_secs()))?;
+                                    let retry_at = Instant::now() + delay;
+                                    while Instant::now() < retry_at {
+                                        if control.is_stopped() {
+                                            return Ok("Internet listener stopped.".into());
+                                        }
+                                        thread::sleep(Duration::from_millis(25));
+                                    }
+                                    delay = (delay * 2).min(Duration::from_secs(30));
+                                }
+                            }
+                        }
+                    }
                     Route::Direct(_) => unreachable!("direct routes always have a listener"),
                 },
             };
@@ -368,7 +439,10 @@ fn execute(
             };
             match accepted {
                 Ok(connection) => break connection,
-                Err(error) if listener.is_some() && !control.is_stopped() => {
+                Err(error)
+                    if (listener.is_some() || matches!(route, Route::Render(_)))
+                        && !control.is_stopped() =>
+                {
                     status(format!(
                         "Unverified connection refused ({error}). Still listening."
                     ))?;
@@ -389,6 +463,7 @@ fn execute(
             control,
             progress_at: Instant::now(),
             auto_accept,
+            route_label: route.label(),
         };
         sensor_client::serve(
             connection,
@@ -421,7 +496,7 @@ fn execute(
         _ => unreachable!(),
     };
     status(format!("Connecting via {}...", route.label()))?;
-    let stream = connect_route(&route, &identity)?;
+    let stream = connect_route(&route, &identity, peer, control)?;
     control.socket(&stream)?;
     let mut connection = SecureConnection::initiate(stream, &identity, peer, DEFAULT_TIMEOUT)
         .map_err(|e| e.to_string())?;
@@ -598,6 +673,7 @@ fn host_desktop(
     connection: &mut SecureConnection,
     consent: &Consent,
     control: &Control,
+    internet: bool,
 ) -> Result<(), sensor_client::EndpointError> {
     let displays = desktop::displays(consent).map_err(|error| {
         sensor_client::EndpointError::Desktop(format!("Cannot enumerate displays: {error}"))
@@ -649,17 +725,24 @@ fn host_desktop(
         } else {
             raw_height
         };
-        let (width, height) = sensor_media::stream_size(output_width, output_height)
+        let (mut width, mut height) = sensor_media::stream_size(output_width, output_height)
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
-        let encoder = codec::H264Encoder::new(width, height, 30, 4_000_000, true)
+        if internet {
+            let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
+            width = (((width as f64 * scale) as u32) & !1).max(2);
+            height = (((height as f64 * scale) as u32) & !1).max(2);
+        }
+        let fps = if internet { 15 } else { 30 };
+        let bitrate = if internet { 1_500_000 } else { 4_000_000 };
+        let encoder = codec::H264Encoder::new(width, height, fps, bitrate, true)
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
         let format = VideoFormat {
             generation,
             display: capture.display.clone(),
             width,
             height,
-            fps_limit: 30,
-            bitrate: 4_000_000,
+            fps_limit: fps,
+            bitrate,
             encoder: encoder.name.clone(),
             hardware: encoder.hardware,
         };
@@ -711,7 +794,7 @@ fn host_desktop(
                 }
             }
         }
-        if last_frame.elapsed() >= Duration::from_millis(33) {
+        if last_frame.elapsed() >= Duration::from_secs_f64(1.0 / format.fps_limit as f64) {
             match capture
                 .next(consent)
                 .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?
@@ -814,7 +897,7 @@ fn execute_remote(
             route.label()
         )))
         .map_err(|_| "Window closed".to_owned())?;
-    let stream = connect_route(&route, &identity)?;
+    let stream = connect_route(&route, &identity, peer, control)?;
     control.socket(&stream)?;
     let mut connection = SecureConnection::initiate(stream, &identity, peer, DEFAULT_TIMEOUT)
         .map_err(|error| error.to_string())?;

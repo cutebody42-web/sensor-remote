@@ -1,0 +1,16 @@
+.git
+.github
+.codex
+target
+work
+tests
+assets
+docs
+scripts
+*.log
+*.exe
+*.pdb
+.env
+.env.*
+**/identity.bin
+**/audit.jsonl

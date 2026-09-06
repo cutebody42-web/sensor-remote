@@ -21,7 +21,9 @@ Equivalent checks are `cargo fmt --all -- --check`,
 `cargo build --workspace --release --locked`.
 
 Artifacts: `target/release/SENSOR-Remote.exe` (Windows-subsystem native GUI),
-`target/release/SENSOR-CLI.exe` (console endpoint).
+`target/release/SENSOR-CLI.exe` (console endpoint), `target/release/sensor-relay.exe`
+(provisioned relay), and `target/release/sensor-rendezvous.exe` (local
+Render-compatible Web Service binary).
 The build embeds the supplied logo, Windows icon/version resources and a
 PerMonitorV2, asInvoker manifest. It requests no administrator privileges.
 

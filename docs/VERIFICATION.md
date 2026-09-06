@@ -7,11 +7,11 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 
 | Check | Result |
 | --- | --- |
-| scripts/verify.ps1 -Release -ReleaseTests | PASS: 55 tests, zero failed; doc-test targets pass |
+| cargo test --workspace --release --locked | PASS: 59 tests, zero failed; doc-tests pass |
 | cargo fmt --all -- --check | PASS after 0.3 changes |
-| cargo test --workspace --release --locked | PASS: 55 tests, zero failed; doc-test targets pass |
+| cargo build --workspace --release --locked | PASS: graphical, console, relay and rendezvous binaries |
 | cargo clippy --workspace --all-targets --locked -- -D warnings | PASS after 0.3 changes |
-| cargo build --workspace --release --locked | PASS: graphical and console Windows executables |
+| Render rendezvous integration | PASS: two native clients exchanged opaque bytes through the WSS profile |
 | git diff --check | PASS at verification |
 | Supplied JPEG versus embedded source | Identical SHA-256; automated exact-asset regression |
 | Native GUI launch | Window and real accessibility controls observed |
@@ -20,10 +20,10 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 | Pixel-level/interactive GUI QA | BLOCKED: desktop lock screen; inspection stopped |
 
 The earlier 0.2.0 unoptimized workspace suite passed 48 tests. The 0.3.0
-changes add remote media, input and full-duplex transport coverage; the current
-release workspace suite is 55 tests with zero failures.
+changes add remote media, input, full-duplex transport and Render Internet
+coverage; the current workspace suite is 59 tests with zero failures.
 
-## Test groups (48 total)
+## Test groups (scoped counts listed)
 
 - Core invariants and deserialization: 4.
 - Crypto, replay/gaps/AAD/tamper and redacted key Debug: 5.
@@ -43,10 +43,12 @@ release workspace suite is 55 tests with zero failures.
 - Full-duplex encrypted reader/writer transport test: 1.
 - Media fragment/pixel/input validation: 3.
 - Authenticated pair relay round trip and wrong relay key: 2.
+- Render registration and two-client opaque WSS relay: 2.
 
 Tests use real local TCP sockets and actual Windows DPAPI, with generated
 test data and temporary profiles. They are not two-physical-machine or
-Internet/NAT tests. User consent in worker tests is a test-provided response;
+Internet/NAT tests. The Render test uses a local service process, not the
+external Render account. User consent in worker tests is a test-provided response;
 the native Accept/Reject buttons were not clicked while Windows was locked.
 
 ## Startup issue found and fixed

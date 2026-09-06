@@ -5,6 +5,45 @@ use std::{
     path::Path,
 };
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Network {
+    server: String,
+}
+
+pub fn load_network(path: &Path) -> Result<Option<String>, String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 4096 {
+        return Err("Network settings exceed size limit".into());
+    }
+    let settings: Network = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    sensor_render::websocket_url(&settings.server).map_err(|e| e.to_string())?;
+    Ok(Some(settings.server))
+}
+
+pub fn save_network(path: &Path, server: &str) -> Result<(), String> {
+    sensor_render::websocket_url(server).map_err(|e| e.to_string())?;
+    let settings = Network {
+        server: server.trim().to_owned(),
+    };
+    let bytes = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
+    let mut temp =
+        tempfile::NamedTempFile::new_in(path.parent().ok_or("Missing settings directory")?)
+            .map_err(|e| e.to_string())?;
+    temp.write_all(&bytes).map_err(|e| e.to_string())?;
+    temp.as_file().sync_all().map_err(|e| e.to_string())?;
+    temp.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Contact {

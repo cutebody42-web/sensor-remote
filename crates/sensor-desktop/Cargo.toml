@@ -21,6 +21,7 @@ sensor-files = { path = "../sensor-files" }
 sensor-audit = { path = "../sensor-audit" }
 sensor-media = { path = "../sensor-media" }
 sensor-relay = { path = "../sensor-relay" }
+sensor-render = { path = "../sensor-render" }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

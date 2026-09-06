@@ -17,8 +17,9 @@ try {
     if ($LASTEXITCODE) { throw 'Dependency metadata failed' }
     $metadata = $metadataText | ConvertFrom-Json
     $null = New-Item -ItemType Directory -Path $packagePath
-    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','target\release\sensor-relay.exe','LICENSE','README.md' -Destination $packagePath
+    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','target\release\sensor-relay.exe','target\release\sensor-rendezvous.exe','LICENSE','README.md','.env.example','render.yaml','Start-SENSOR-Internet.cmd' -Destination $packagePath
     Copy-Item -LiteralPath 'docs' -Destination (Join-Path $packagePath 'docs') -Recurse
+    Copy-Item -LiteralPath 'deployment' -Destination (Join-Path $packagePath 'deployment') -Recurse
     $licenseRoot = Join-Path $packagePath 'third-party-licenses'
     $null = New-Item -ItemType Directory -Path $licenseRoot
     $inventory = [Collections.Generic.List[object]]::new()
@@ -41,9 +42,15 @@ try {
     }
     # Generated packaging metadata, not handwritten application configuration.
     $inventory | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $packagePath 'DEPENDENCIES.json') -Encoding utf8
-    & git rev-parse HEAD | Set-Content -LiteralPath (Join-Path $packagePath 'SOURCE_REVISION.txt') -Encoding utf8
+    $revision = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE) { throw 'Cannot record source revision' }
-    $hashes = Get-FileHash -LiteralPath (Join-Path $packagePath 'SENSOR-Remote.exe'),(Join-Path $packagePath 'SENSOR-CLI.exe'),(Join-Path $packagePath 'sensor-relay.exe') -Algorithm SHA256
+    if ((& git status --porcelain)) {
+        "$revision (working tree changes included)" |
+            Set-Content -LiteralPath (Join-Path $packagePath 'SOURCE_REVISION.txt') -Encoding utf8
+    } else {
+        $revision | Set-Content -LiteralPath (Join-Path $packagePath 'SOURCE_REVISION.txt') -Encoding utf8
+    }
+    $hashes = Get-FileHash -LiteralPath (Join-Path $packagePath 'SENSOR-Remote.exe'),(Join-Path $packagePath 'SENSOR-CLI.exe'),(Join-Path $packagePath 'sensor-relay.exe'),(Join-Path $packagePath 'sensor-rendezvous.exe') -Algorithm SHA256
     $hashes | ForEach-Object { $_.Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($_.Path) } |
         Set-Content -LiteralPath (Join-Path $packagePath 'SHA256SUMS.txt') -Encoding utf8
     Write-Output "Packaged unsigned Windows development build: $packagePath"

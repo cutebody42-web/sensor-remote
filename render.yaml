@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: sensor-rendezvous
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deployment/render/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: SENSOR_MODE
+        value: RENDER_TEST
+      - key: RELAY_MAX_BITRATE
+        value: "2000000"
+      - key: RELAY_MAX_FPS
+        value: "15"
+      - key: RELAY_MAX_RESOLUTION
+        value: 1280x720

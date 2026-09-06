@@ -1,0 +1,31 @@
+[package]
+name = "sensor-rendezvous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sensor-rendezvous"
+path = "src/main.rs"
+
+[dependencies]
+rand_core.workspace = true
+sensor-render = { path = "../sensor-render" }
+sensor-core = { path = "../sensor-core" }
+sensor-crypto = { path = "../sensor-crypto" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tungstenite.workspace = true
+
+[dev-dependencies]
+sensor-audit = { path = "../sensor-audit" }
+sensor-client = { path = "../sensor-client" }
+sensor-files = { path = "../sensor-files" }
+sensor-transport = { path = "../sensor-transport" }
+tempfile.workspace = true
+sensor-identity = { path = "../sensor-identity" }
+sensor-render = { path = "../sensor-render" }
+sensor-session = { path = "../sensor-session" }
