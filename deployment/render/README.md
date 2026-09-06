@@ -88,6 +88,15 @@ tokens are rejected. Control messages are bounded to 16 KiB, relay frames to
 These safeguards do not replace an independent security review or production
 account/rate-limit infrastructure.
 
+Railway alternative
+-------------------
+
+The same repository includes `railway.json`. Railway uses the existing Docker
+image, `/health` health check, and automatic restart policy. The service's
+public Railway domain is shown on the service card after the first successful
+deployment. Use that domain as the HTTPS base URL in SENSOR; the client derives
+the WSS `/ws` endpoint automatically.
+
 ## Local smoke test
 
 ```powershell
