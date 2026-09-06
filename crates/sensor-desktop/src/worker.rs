@@ -15,7 +15,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
@@ -27,6 +27,8 @@ use std::{
 use sensor_session::permissions::{Consent, Permissions};
 #[cfg(windows)]
 use sensor_windows::{codec, desktop, input};
+#[cfg(windows)]
+use std::sync::atomic::AtomicU64;
 
 pub enum Event {
     Online(bool),
@@ -149,16 +151,19 @@ impl Control {
             .ok()
             .and_then(|frame| frame.clone())
     }
+    #[cfg(windows)]
     fn set_remote_sender(&self, sender: SyncSender<DesktopMessage>) {
         if let Ok(mut current) = self.remote_sender.lock() {
             *current = Some(sender);
         }
     }
+    #[cfg(windows)]
     fn clear_remote_sender(&self) {
         if let Ok(mut current) = self.remote_sender.lock() {
             *current = None;
         }
     }
+    #[cfg(windows)]
     fn publish_frame(&self, frame: DecodedFrame) {
         if let Ok(mut current) = self.remote_frame.lock() {
             *current = Some(Arc::new(frame));
