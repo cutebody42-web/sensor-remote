@@ -1,17 +1,20 @@
 # Verification evidence — 0.3.0
 
-## Latest Internet deployment attempt — 2026-09-06
+## Latest verified Internet deployment — 2026-09-06
 
-- Private repository created and source pushed: https://github.com/cutebody42-web/sensor-remote (commit `b5542d7`).
+- Private repository source: https://github.com/cutebody42-web/sensor-remote.
 - `cargo test --workspace --release --locked`: **62 passed, 0 failed, 1 ignored**; doc-tests passed. The ignored test requires a real deployed HTTPS URL.
+- `cargo check --workspace --release`: passed after selecting the Rustls `ring` crypto provider for native WSS clients.
+- `cargo fmt --all -- --check`: passed.
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
 - Added local integration evidence for delayed registration, server-challenge replay rejection, signed listener-role binding, invalid token rejection, concurrent listener/outgoing registration, cancellation, authenticated encrypted chat, a 1,048,737-byte file with SHA-256 verification, and denied file access.
-- Fixed Internet registration timeouts, listener replacement, reconnect/cancellation, UI connection-state reporting, saved server configuration, bounded WebSocket messages/connections, and relay write backpressure. Render capture profile is now at most 1280x720, 15 FPS, 1.5 Mbit/s; aggregate relay cap is 2 Mbit/s by default.
-- Render configured for Docker, Free ($0/month), Frankfurt, `main`, `deployment/render/Dockerfile`, root build context, and `/health`.
-- **Deployment blocked:** Render displayed its Add Card verification modal on both deployment attempts while Free was visibly selected. No card was entered, no paid compute selected, and no live public URL was created or verified. The prepared form was left open for the account owner.
-- Therefore public WSS, two physical devices on different networks, and production availability remain **unverified**. The laptop is not running a public server. Do not interpret the passing local tests as an Internet deployment or AnyDesk parity.
+- Fixed Internet registration timeouts, listener replacement, reconnect/cancellation, UI connection-state reporting, saved server configuration, bounded WebSocket messages/connections, Rustls provider selection, and relay write backpressure. Internet capture profile is now at most 1280x720, 15 FPS, 1.5 Mbit/s; aggregate relay cap is 2 Mbit/s by default.
+- Railway deployment is live from `railway.json` and `deployment/render/Dockerfile` at `https://sensor-rendezvous-production.up.railway.app`.
+- Public `GET /health` returned `status: ok`, `mode: RENDER_TEST`, `database: in_memory_presence`, and the configured 2 Mbit/s relay cap.
+- `SENSOR_TEST_SERVER=https://sensor-rendezvous-production.up.railway.app cargo test -p sensor-rendezvous --test internet_security deployed_wss_encrypted_chat_file_and_denial --release --locked -- --ignored`: **1 passed, 0 failed**. This real public-WSS test exercised encrypted chat, a 1,048,737-byte encrypted file with SHA-256 verification, and denied file access.
+- The Windows package now embeds `sensor-network.json` for the verified Railway URL and its launcher defaults to that service.
 
-The following sections retain earlier verification evidence; their counts and deployment status are superseded by the latest section above.
+The remaining limitations below are product-scope limitations, not a claim that the public deployment is offline.
 
 Date: 2026-09-06. Local Windows x86_64 MSVC development environment.
 Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
@@ -20,11 +23,11 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 
 | Check | Result |
 | --- | --- |
-| cargo test --workspace --release --locked | PASS: 59 tests, zero failed; doc-tests pass |
+| cargo test --workspace --release --locked | PASS: 62 passed, zero failed, one intentionally ignored deployment test; doc-tests pass |
 | cargo fmt --all -- --check | PASS after 0.3 changes |
 | cargo build --workspace --release --locked | PASS: graphical, console, relay and rendezvous binaries |
 | cargo clippy --workspace --all-targets --locked -- -D warnings | PASS after 0.3 changes |
-| Render rendezvous integration (earlier) | PASS: two native clients exchanged opaque bytes through a local plain-WS relay; not public WSS |
+| Public Railway WSS integration | PASS: encrypted chat, encrypted file/hash, and denied file access through the live HTTPS/WSS service |
 | git diff --check | PASS at verification |
 | Supplied JPEG versus embedded source | Identical SHA-256; automated exact-asset regression |
 | Native GUI launch | Window and real accessibility controls observed |
@@ -33,8 +36,9 @@ Rust 1.98.1, MSVC 14.44.35207, Windows SDK 10.0.26100.0.
 | Pixel-level/interactive GUI QA | BLOCKED: desktop lock screen; inspection stopped |
 
 The earlier 0.2.0 unoptimized workspace suite passed 48 tests. The 0.3.0
-changes add remote media, input, full-duplex transport and Render Internet
-coverage; the current workspace suite is 59 tests with zero failures.
+changes add remote media, input, full-duplex transport and Internet coverage;
+the current workspace suite has 62 passing tests with zero failures plus one
+explicitly ignored deployment test that was run separately against Railway.
 
 ## Test groups (scoped counts listed)
 
@@ -59,9 +63,9 @@ coverage; the current workspace suite is 59 tests with zero failures.
 - Render registration and two-client opaque WSS relay: 2.
 
 Tests use real local TCP sockets and actual Windows DPAPI, with generated
-test data and temporary profiles. They are not two-physical-machine or
-Internet/NAT tests. The Render test uses a local service process, not the
-external Render account. User consent in worker tests is a test-provided response;
+test data and temporary profiles. The public WSS test uses the external
+Railway service from this Windows machine, but it is not a two-physical-machine
+or NAT/failover test. User consent in worker tests is a test-provided response;
 the native Accept/Reject buttons were not clicked while Windows was locked.
 
 ## Startup issue found and fixed

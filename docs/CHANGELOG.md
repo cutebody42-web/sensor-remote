@@ -2,10 +2,10 @@
 
 ## 0.3.0 - 2026-09-06 (Windows attended remote-desktop development build)
 
-- Added the temporary Render Free Internet transport: native Rust rendezvous
+- Added the Internet transport: native Rust rendezvous
   service, `/health`, ephemeral device presence, signed registration, token
   pairing, heartbeat, bounded reconnect, and opaque WSS relay.
-- Added `render.yaml`, Docker deployment, client environment configuration,
+- Added Railway/Render Docker deployment configuration, client environment configuration,
   automatic online listener registration, and a two-client WSS integration test.
 - Added attended remote desktop sessions in the native Windows app.
 - Added DXGI Desktop Duplication capture on the ordinary interactive desktop.

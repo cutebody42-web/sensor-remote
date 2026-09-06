@@ -14,14 +14,14 @@ This is a functioning native Windows attended remote-desktop development app,
   already pinned peer while the GUI remains open.
 - No virtual printer, physical printing pipeline, Auto Print, VPN, tunnels,
   Wake-on-LAN, discovery or whiteboard.
-- Render `RENDER_TEST` provides temporary Internet registration, online lookup,
+- Railway `RENDER_TEST` provides temporary Internet registration, online lookup,
   heartbeat and opaque WSS relay. Presence is in memory and disappears on a
-  service restart; Render Free may cold-start. This is not durable account
+  service restart; the Railway trial has a finite allowance. This is not durable account
   authentication, global collision resolution, an SLA, or unattended access.
-- The GUI supports direct TCP, the Render WSS relay, or a self-hosted,
+- The GUI supports direct TCP, the Internet WSS relay, or a self-hosted,
   provisioned single-pair relay. The CLI remains direct-TCP oriented. There is
   no automatic direct-first fallback, TLS metadata privacy, QUIC, ICE/STUN/
-  TURN, NAT traversal, proxy or regional failover. Render does not terminate
+  TURN, NAT traversal, proxy or regional failover. The rendezvous service does not terminate
   SENSOR endpoint encryption and currently cannot enforce FPS/resolution
   inside encrypted media frames.
 - A profile permits one active GUI job. Incoming mode is chat, file transfer,

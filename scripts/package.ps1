@@ -17,7 +17,7 @@ try {
     if ($LASTEXITCODE) { throw 'Dependency metadata failed' }
     $metadata = $metadataText | ConvertFrom-Json
     $null = New-Item -ItemType Directory -Path $packagePath
-    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','target\release\sensor-relay.exe','target\release\sensor-rendezvous.exe','LICENSE','README.md','.env.example','render.yaml','Start-SENSOR-Internet.cmd' -Destination $packagePath
+    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','target\release\sensor-relay.exe','target\release\sensor-rendezvous.exe','LICENSE','README.md','.env.example','sensor-network.json','render.yaml','railway.json','Start-SENSOR-Internet.cmd' -Destination $packagePath
     Copy-Item -LiteralPath 'docs' -Destination (Join-Path $packagePath 'docs') -Recurse
     Copy-Item -LiteralPath 'deployment' -Destination (Join-Path $packagePath 'deployment') -Recurse
     $licenseRoot = Join-Path $packagePath 'third-party-licenses'
