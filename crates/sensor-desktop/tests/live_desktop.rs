@@ -44,6 +44,14 @@ fn public_wss_actual_mouse_unicode_keyboard_wheel_and_dynamic_video() {
 }
 
 fn real_desktop(input_test: bool) {
+    let test_seconds = std::env::var("SENSOR_TEST_SECONDS")
+        .ok()
+        .map(|value| value.parse::<u64>().expect("invalid test duration"))
+        .unwrap_or(12);
+    assert!(
+        (12..=480).contains(&test_seconds),
+        "opt-in duration must be 12 to 480 seconds"
+    );
     let server = std::env::var("SENSOR_TEST_SERVER").expect("explicit test endpoint required");
     assert!(server.starts_with("https://"));
     let route = Route::Render(RenderRoute { server });
@@ -95,7 +103,7 @@ fn real_desktop(input_test: bool) {
         host_peer,
         viewer_dir.path().into(),
     );
-    let deadline = Instant::now() + Duration::from_secs(100);
+    let deadline = Instant::now() + Duration::from_secs(test_seconds + 90);
     let mut approved = false;
     let mut format_seen = false;
     let mut first_frame = None;
@@ -221,6 +229,33 @@ fn real_desktop(input_test: bool) {
                     println!(
                         "REAL INPUT: native QA target verified mouse click, Unicode text and wheel"
                     );
+                } else if input_stage == 3 && focused {
+                    assert!(sender.control.send_remote(
+                        sensor_media::DesktopMessage::SelectDisplay(format.display.index)
+                    ));
+                    input_stage = 4;
+                } else if input_stage == 4
+                    && format.generation > 1
+                    && focused
+                    && state["text_focused"].as_bool() == Some(true)
+                {
+                    // This stale event must be discarded before Windows input.
+                    assert!(sender
+                        .control
+                        .send_remote(sensor_media::DesktopMessage::Input {
+                            generation: format.generation - 1,
+                            event: Input::Text("STALE EVENT MUST NOT ARRIVE".into()),
+                        }));
+                    input_at = Instant::now();
+                    input_stage = 5;
+                } else if input_stage == 5 && input_at.elapsed() > Duration::from_secs(1) {
+                    assert_eq!(
+                        state["typed_expected"].as_bool(),
+                        Some(true),
+                        "stale input altered the native fixture after monitor reconfiguration"
+                    );
+                    input_stage = 6;
+                    println!("REAL MONITOR RECONFIGURATION: new format received and stale-generation text rejected");
                 }
             }
         }
@@ -233,8 +268,8 @@ fn real_desktop(input_test: bool) {
         }
         if let Some(first_frame) = first_frame {
             if rtt > 0
-                && started.elapsed() > Duration::from_secs(12)
-                && (!input_test || (input_stage == 3 && pixels_changed && frames > 4))
+                && started.elapsed() > Duration::from_secs(test_seconds)
+                && (!input_test || (input_stage == 6 && pixels_changed && frames > 4))
             {
                 println!(
                     "PUBLIC WSS REAL DESKTOP: first_frame_ms={}, frames={frames}, encoded_bytes={bytes}, rtt_ms={:.1}, duration_ms={}",

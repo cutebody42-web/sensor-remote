@@ -542,6 +542,7 @@ impl App {
         if self.remote_source_listener == source_listener {
             self.remote_frame = None;
             self.remote_texture = None;
+            self.uploaded_frame = None;
             self.remote_format = None;
             self.remote_displays.clear();
             self.remote_cursor = None;
@@ -709,6 +710,15 @@ impl App {
                     }
                 }
                 Event::Consent(peer, mode, reply) => {
+                    if let Err(error) = settings::known_peer(
+                        &peer.device_id.to_string(),
+                        &hex(&peer.public_key),
+                        &self.contacts,
+                    ) {
+                        let _ = reply.try_send(false);
+                        self.notice = Some(format!("Incoming identity check failed: {error}"));
+                        continue;
+                    }
                     if self.consent.is_some()
                         || (source_listener && (self.job.is_some() || self.listener_busy))
                     {
@@ -955,6 +965,25 @@ impl App {
         ui.add_space(6.0);
         card(ui, |ui| {
             ui.add_enabled_ui(self.job.is_none(), |ui| self.peer_form(ui));
+            if self.use_render {
+                ui.horizontal_wrapped(|ui| {
+                    for (label, control) in [
+                        ("Control remote desktop", true),
+                        ("View remote desktop", false),
+                    ] {
+                        if primary(ui, label, self.ready()) {
+                            match self.outbound_route() {
+                                Ok(route) => self.begin(Task::Remote {
+                                    route,
+                                    control,
+                                    clipboard: self.request_clipboard,
+                                }),
+                                Err(error) => self.notice = Some(error),
+                            }
+                        }
+                    }
+                });
+            }
             ui.separator();
             ui.collapsing("Network settings", |ui| {
             ui.horizontal(|ui| {
@@ -1731,6 +1760,11 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(12))
             .show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
+                    // Always reachable, including short windows and scrolled
+                    // pages. Do not hide the local safety control in a sidebar.
+                    if self.session_active() && ui.button("Stop / disconnect").clicked() {
+                        self.stop();
+                    }
                     ui.colored_label(if self.session_active() { TEAL } else { MUTED }, "●");
                     ui.label(RichText::new(&self.status).size(12.0));
                     if let Some(started) = self.started {
@@ -1800,7 +1834,7 @@ impl eframe::App for App {
                 );
                 ui.label(
                     RichText::new(
-                        "Nothing listens until you start it. Closing SENSOR ends the session.",
+                        "Internet registration stays active while SENSOR is open. Incoming Internet sessions require your approval.",
                     )
                     .size(12.0)
                     .color(MUTED),

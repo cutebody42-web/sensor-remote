@@ -2,7 +2,7 @@
 
 SENSOR TECHNOLOGY · Designed by ENG Mohamed Sayed.
 
-Version **0.3.1 — Windows attended remote-desktop build with Internet
+Version **0.3.2 — Windows attended remote-desktop build with Internet
 transport**. The shipped package is configured for the verified Railway
 rendezvous service; this is still an unsigned attended development release,
 not a complete AnyDesk-equivalent product.

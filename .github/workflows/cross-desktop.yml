@@ -1,0 +1,55 @@
+name: SENSOR two-machine native video fixture
+on:
+  workflow_dispatch:
+    inputs:
+      viewer_id:
+        description: Temporary laptop viewer ID (public)
+        required: true
+        type: string
+      viewer_key:
+        description: Temporary laptop viewer public key
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  native-cloud-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Build native fixtures
+        run: cargo build -p sensor-desktop --example cross_desktop --example qa_target --locked
+      - name: Prepare temporary host identity
+        shell: pwsh
+        run: |
+          & '.\target\debug\examples\cross_desktop.exe' prepare (Join-Path $env:RUNNER_TEMP 'sensor-desktop-profile') (Join-Path $env:RUNNER_TEMP 'sensor-desktop-public.json')
+          if ($LASTEXITCODE) { throw 'Fixture preparation failed' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sensor-desktop-public
+          path: ${{ runner.temp }}/sensor-desktop-public.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Exercise actual Windows desktop for the pinned view-only fixture
+        shell: pwsh
+        env:
+          SENSOR_VIEWER_ID: ${{ inputs.viewer_id }}
+          SENSOR_VIEWER_KEY: ${{ inputs.viewer_key }}
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'sensor-desktop.log'
+          if ($env:SENSOR_VIEWER_ID -notmatch '^[1-9][0-9]{8}$' -or $env:SENSOR_VIEWER_KEY -notmatch '^[0-9a-f]{64}$') { throw 'Invalid public viewer identity' }
+          & '.\target\debug\examples\cross_desktop.exe' host (Join-Path $env:RUNNER_TEMP 'sensor-desktop-profile') $env:SENSOR_VIEWER_ID $env:SENSOR_VIEWER_KEY (Join-Path (Get-Location) 'target\debug\examples\qa_target.exe') 2>&1 | Tee-Object -FilePath $out
+          if ($LASTEXITCODE) { throw 'Real Windows desktop fixture failed; no synthetic capture fallback permitted' }
+          if ([string](Get-Content $out -Raw) -notmatch 'CROSS_DESKTOP_HOST_PASS') { throw 'Missing native video evidence' }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sensor-desktop-evidence
+          path: ${{ runner.temp }}/sensor-desktop.log
+          retention-days: 7

@@ -58,13 +58,27 @@ fn host(server: &str, public_path: &Path) -> Result<(), Box<dyn Error>> {
             }
         }
     };
-    let stream = sensor_render::accept_with_control(
-        server,
-        &identity,
-        Duration::from_secs(90),
-        &|| started.elapsed() > Duration::from_secs(600),
-        &ready,
-    )?;
+    let stream = loop {
+        let remaining = Duration::from_secs(600).saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err("fixture waiting deadline exceeded".into());
+        }
+        match sensor_render::accept_with_control(
+            server,
+            &identity,
+            remaining.min(Duration::from_secs(90)),
+            &|| started.elapsed() > Duration::from_secs(600),
+            &ready,
+        ) {
+            Ok(stream) => break stream,
+            Err(error) => {
+                eprintln!(
+                    "Fixture registration interrupted; retrying within the test deadline: {error}"
+                );
+                std::thread::sleep(Duration::from_millis(500));
+            }
+        }
+    };
     let connection = SecureConnection::accept_unpinned(stream, &identity, Duration::from_secs(90))?;
     sensor_client::serve(
         connection,

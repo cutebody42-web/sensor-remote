@@ -40,16 +40,27 @@ is invalid.
 
 ## Separate-network and packaging gates
 
-The manual `cross-network.yml` workflow starts a bounded Windows cloud
-fixture which accepts only a synthetic file in a temporary directory. The
-laptop pins its public key and sends 8,388,625 deterministic bytes through
-public WSS; both ends verify the full SHA-256. It does not expose the runner's
+The manual `cross-network.yml` workflow starts a Windows cloud sender; the
+laptop runs a bounded fixture accepting only a synthetic file in a temporary
+directory. The cloud sender pins the laptop fixture's public key and sends
+8,388,625 deterministic bytes through public WSS; both ends verify the full
+SHA-256. It does not expose the runner's
 desktop, user files, shell or credentials. Record the actual workflow result
 before claiming this gate passed.
 
-Installer lifecycle, final strict CI and final deployed server version are
-release gates; generated output paths and their results must be recorded
-after execution, not inferred from source code.
+The per-user NSIS install/reinstall/uninstall lifecycle passed. A synthetic
+unrelated file survived; the pre-existing real user profile was hash-checked
+and unchanged. Add/Remove Programs command quoting was verified. The
+CycloneDX 1.6 SBOM passed its official JSON schema and all 281 graph references
+were checked. Strict Windows and Ubuntu CI passed for application commit
+52c79767ac944f522be9d2365782ce8c01ec12c2. Public `/health` now reports 0.3.1.
+
+The initial cloud-fixture attempt produced an empty log and a misleading
+workflow success; it is NOT transfer evidence. The workflow now runs its
+endpoint in the foreground and requires a nonempty positive result plus a
+zero exit code. The next attempt correctly failed when a service deployment
+restarted registration. The bounded laptop fixture now retries registration
+with the same temporary identity while waiting for the cloud build.
 
 ## Outstanding product work
 

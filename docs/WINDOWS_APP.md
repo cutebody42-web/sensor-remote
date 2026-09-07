@@ -1,14 +1,16 @@
 # Using the native Windows app
 
 SENSOR-Remote.exe is the graphical application. SENSOR-CLI.exe is an optional
-console companion. Neither is a website. This is version 0.3.0 development,
+console companion. Neither is a website. This is version 0.3.1 development,
 with attended remote desktop, an explicitly provisioned relay path, and a
 Railway Internet path implemented, but not the completed
 commercial-equivalent product.
 
 ## First launch
 
-1. Open SENSOR-Remote.exe. It runs as the current user, without elevation.
+1. Install with SENSOR-Setup-0.3.1.exe, then open SENSOR Remote from Start.
+   Alternatively open the portable SENSOR-Remote.exe. Both run as the current
+   user, without elevation. The installer changes no firewall rules.
 2. Your persistent device ID appears. Copy the public key to the other device
    owner through a trusted channel and compare the full key.
 3. The shipped package contains the verified Railway URL. With
@@ -18,7 +20,30 @@ commercial-equivalent product.
 The supplied JPEG logo is embedded unchanged; no extra image file or browser
 runtime is needed. Window rendering uses native egui/wgpu Direct3D 12.
 
-## Two-PC attended chat
+## Internet: connect from another Wi-Fi or network
+
+1. Install/open SENSOR on both Windows computers. Keep the receiving laptop
+   awake, unlocked and connected. Wait for **Online** on its Connect page.
+2. Enter its nine-digit device ID on the initiating computer. Choose
+   **Control remote desktop**, **View remote desktop**, chat, or file transfer.
+3. The receiving owner checks the requester and requested access, then accepts.
+   No LAN address or port forwarding is needed for the packaged Internet route.
+4. For a trusted regular contact, compare the full public key over another
+   channel and save it. The saved pin is checked on subsequent ID-only calls.
+5. Use **Stop / disconnect** to revoke the session. Closing the app stops it.
+   A peer ending its session leaves the receiving listener able to register again.
+
+Text clipboard is off by default. Select **Request text clipboard sharing**
+before connecting, obtain the host's explicit approval, then use the session
+clipboard toggle to disable it when needed. Text is limited to 64 KiB; images
+and file clipboard are not supported. Pre-session contents are not sent.
+
+Default installation: `%LOCALAPPDATA%\Programs\SENSOR Remote`.
+The persistent profile remains under `%LOCALAPPDATA%\SENSOR Technology\Remote`.
+Uninstall removes packaged program files and shortcuts, not that profile,
+received files, or unrelated files in the install directory.
+
+## Optional direct-TCP attended chat (not needed for Internet mode)
 
 1. Exchange both device IDs and public keys. On each PC enter the other peer's
    ID/key and confirm that you compared it.
@@ -39,7 +64,7 @@ endpoint-encrypted bytes; it does not replace endpoint authentication. See
 
 No firewall configuration is automatic. Network/firewall setup for an actual
 second PC is the device owner's responsibility. For Internet access, select
-**Render test (HTTPS/WSS)** or configure the environment variables below; no
+**Internet (HTTPS/WSS)** or configure the environment variables below; no
 LAN address or port-forwarding is required.
 
 ## Internet mode

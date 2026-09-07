@@ -395,6 +395,9 @@ fn execute(
         accept_any,
     } = task
     {
+        if auto_accept && (accept_any || peer.public_key == [0; 32]) {
+            return Err("Automatic acceptance requires one explicitly pinned peer; unknown peers always require local consent.".into());
+        }
         let receiver = FileReceiver::open(receive_dir).map_err(|e| e.to_string())?;
         let mut log = AuditLog::open(&config.join("audit.jsonl"), identity.keypair())
             .map_err(|e| e.to_string())?;
@@ -1228,6 +1231,33 @@ fn execute_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn automatic_acceptance_cannot_be_combined_with_unknown_peers() {
+        for (accept_any, public_key) in [(true, [1; 32]), (false, [0; 32])] {
+            let root = tempfile::tempdir().unwrap();
+            let config = root.path().join("must-not-be-created");
+            let (events, _receiver) = mpsc::sync_channel(4);
+            let identity = DeviceIdentity::generate();
+            let result = execute(
+                Task::Host {
+                    route: Route::Direct("127.0.0.1:0".parse().unwrap()),
+                    receive_dir: config.clone(),
+                    auto_accept: true,
+                    accept_any,
+                },
+                identity.clone(),
+                ExpectedPeer {
+                    device_id: identity.device_id(),
+                    public_key,
+                },
+                config.clone(),
+                &events,
+                &Control::default(),
+            );
+            assert!(result.unwrap_err().contains("explicitly pinned"));
+            assert!(!config.exists());
+        }
+    }
     #[cfg(windows)]
     #[test]
     fn full_host_queue_aborts_without_blocking_or_marking_local_stop() {

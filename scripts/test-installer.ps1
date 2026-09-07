@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Installer)
+param([Parameter(Mandatory)][string]$Installer, [string]$ExpectedVersion = '0.3.2')
 $ErrorActionPreference = 'Stop'
 $sensorInstaller = (Resolve-Path -LiteralPath $Installer).Path
 $sensorRegistry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote'
@@ -19,7 +19,7 @@ foreach ($sensorPass in 1..2) {
     $sensorProcess = Start-Process -FilePath $sensorInstaller -ArgumentList ('/S /D=' + $sensorTarget) -WindowStyle Hidden -Wait -PassThru
     if ($sensorProcess.ExitCode -ne 0) { throw "Installer pass $sensorPass failed: $($sensorProcess.ExitCode)" }
     $sensorInstall = Get-ItemProperty -LiteralPath $sensorRegistry
-    if ($sensorInstall.InstallLocation -ne $sensorTarget -or $sensorInstall.DisplayVersion -ne '0.3.1') { throw 'Installation registration mismatch' }
+    if ($sensorInstall.InstallLocation -ne $sensorTarget -or $sensorInstall.DisplayVersion -ne $ExpectedVersion) { throw 'Installation registration mismatch' }
     if ($sensorInstall.UninstallString -ne ('"' + $sensorTarget + '\Uninstall.exe"')) { throw 'Uninstall command is incorrectly quoted' }
     foreach ($sensorFile in @('SENSOR-Remote.exe','SENSOR-CLI.exe','sensor-network.json','sbom.cdx.json','Uninstall.exe')) {
         if (!(Test-Path -LiteralPath (Join-Path $sensorTarget $sensorFile))) { throw "Missing installed file: $sensorFile" }

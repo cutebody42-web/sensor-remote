@@ -128,22 +128,30 @@ pub fn load(path: &Path) -> Result<Vec<Contact>, String> {
         return Err("Contact store exceeds its size limit.".into());
     }
     let contacts: Vec<Contact> = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    if contacts.len() > 100 {
-        return Err("Contact limit is 100.".into());
-    }
-    for contact in &contacts {
-        contact.validate()?;
-    }
+    validate_contacts(&contacts)?;
     Ok(contacts)
 }
 
-pub fn save(path: &Path, contacts: &[Contact]) -> Result<(), String> {
+fn validate_contacts(contacts: &[Contact]) -> Result<(), String> {
     if contacts.len() > 100 {
         return Err("Contact limit is 100.".into());
     }
+    let mut ids = std::collections::HashSet::new();
     for contact in contacts {
         contact.validate()?;
+        let peer = super::peer(&contact.id, &contact.key)?;
+        if peer.public_key == [0; 32] {
+            return Err("A trusted contact requires a verified, nonzero public key.".into());
+        }
+        if !ids.insert(peer.device_id) {
+            return Err("Duplicate device IDs in the contact store are not allowed.".into());
+        }
     }
+    Ok(())
+}
+
+pub fn save(path: &Path, contacts: &[Contact]) -> Result<(), String> {
+    validate_contacts(contacts)?;
     let bytes = serde_json::to_vec_pretty(contacts).map_err(|e| e.to_string())?;
     if bytes.len() > 65536 {
         return Err("Contact store exceeds its size limit.".into());
@@ -160,6 +168,27 @@ pub fn save(path: &Path, contacts: &[Contact]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn duplicate_and_unpinned_contacts_fail_before_replacing_the_store() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("contacts.json");
+        let first = Contact {
+            name: "Verified".into(),
+            id: "123456789".into(),
+            key: "ab".repeat(32),
+            address: String::new(),
+        };
+        save(&path, std::slice::from_ref(&first)).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let mut second = first.clone();
+        second.id = "123 456 789".into();
+        second.key = "cd".repeat(32);
+        assert!(save(&path, &[first.clone(), second]).is_err());
+        let mut unpinned = first;
+        unpinned.key = "00".repeat(32);
+        assert!(save(&path, &[unpinned]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
     #[test]
     fn id_only_connections_use_saved_key_and_refuse_replacement() {
         let contact = Contact {

@@ -8,6 +8,9 @@ $sensorPackage = (Resolve-Path -LiteralPath $PackageDirectory).Path
 $sensorCompiler = (Resolve-Path -LiteralPath $Compiler).Path
 $sensorRepo = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $sensorOutput = [IO.Path]::GetFullPath($OutputFile)
+$sensorBom = Get-Content -LiteralPath (Join-Path $sensorPackage 'sbom.cdx.json') -Raw | ConvertFrom-Json
+$sensorVersion = [string]$sensorBom.metadata.component.version
+if ($sensorVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Invalid package version for installer' }
 if (Test-Path -LiteralPath $sensorOutput) { throw 'Installer output already exists; use a new path.' }
 $sensorTemp = Join-Path ([IO.Path]::GetTempPath()) ('sensor-installer-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $sensorTemp
@@ -35,7 +38,7 @@ foreach ($sensorDirectory in ($sensorDirectories | Sort-Object Length -Descendin
 # Mechanical manifest generation from exact packaged filenames.
 $sensorInstallLines | Set-Content -LiteralPath (Join-Path $sensorTemp 'payload-install.nsh') -Encoding utf8
 $sensorRemoveLines | Set-Content -LiteralPath (Join-Path $sensorTemp 'payload-uninstall.nsh') -Encoding utf8
-& $sensorCompiler /V2 /WX ("/DPACKAGE=" + $sensorPackage) ("/DOUTPUT=" + $sensorOutput) (Join-Path $sensorTemp 'sensor.nsi')
+& $sensorCompiler /V2 /WX ("/DPACKAGE=" + $sensorPackage) ("/DOUTPUT=" + $sensorOutput) ("/DVERSION=" + $sensorVersion) (Join-Path $sensorTemp 'sensor.nsi')
 if ($LASTEXITCODE) { throw 'NSIS compilation failed' }
 Get-FileHash -LiteralPath $sensorOutput -Algorithm SHA256
 Write-Output "Built unsigned per-user installer: $sensorOutput"

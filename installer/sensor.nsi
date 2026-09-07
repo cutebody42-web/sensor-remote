@@ -10,7 +10,7 @@ Unicode true
   !error "Pass /DOUTPUT=absolute-installer-path"
 !endif
 !ifndef VERSION
-  !define VERSION "0.3.1"
+  !error "Pass /DVERSION=the-packaged-version"
 !endif
 Name "SENSOR Remote Access"
 OutFile "${OUTPUT}"
