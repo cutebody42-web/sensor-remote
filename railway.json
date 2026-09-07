@@ -2,7 +2,14 @@
   "$schema": "https://railway.com/railway.schema.json",
   "build": {
     "builder": "DOCKERFILE",
-    "dockerfilePath": "deployment/render/Dockerfile"
+    "dockerfilePath": "deployment/render/Dockerfile",
+    "watchPatterns": [
+      "Cargo.toml", "Cargo.lock", "**/Cargo.toml", ".cargo/**", ".dockerignore",
+      "crates/sensor-rendezvous/**", "crates/sensor-render/**",
+      "crates/sensor-core/**", "crates/sensor-crypto/**",
+      "crates/sensor-identity/**", "crates/sensor-protocol/**",
+      "Dockerfile", "deployment/render/Dockerfile", "railway.json"
+    ]
   },
   "deploy": {
     "healthcheckPath": "/health",
