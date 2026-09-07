@@ -1,7 +1,7 @@
 # Using the native Windows app
 
 SENSOR-Remote.exe is the graphical application. SENSOR-CLI.exe is an optional
-console companion. Neither is a website. This is version 0.3.1 development,
+console companion. Neither is a website. This is version 0.3.2 development,
 with attended remote desktop, an explicitly provisioned relay path, and a
 Railway Internet path implemented, but not the completed
 commercial-equivalent product.
@@ -52,7 +52,8 @@ received files, or unrelated files in the install directory.
    listening. `127.0.0.1` accepts connections from this PC only.
 3. On the initiating PC enter the receiver's IP:port and Start encrypted chat.
 4. The receiver sees the authenticated ID/key and requested mode. Accept or
-   Reject explicitly. No unattended grant exists.
+   Reject explicitly unless you previously authorized that exact verified
+   device for unattended screen/control; chat/file operations still require consent.
 5. Chat is turn-based in this build: send, receive a reply, then send again.
    Reply/idle timeout is 120 seconds. Stop/disconnect closes the socket.
 
@@ -138,10 +139,25 @@ Data is under %LOCALAPPDATA%/SENSOR Technology/Remote. To isolate a test profile
 
 Identity keys remain tied to the current Windows user by DPAPI. A profile is not
 a cross-account portable credential backup. A second GUI for the same profile
-is refused. Nothing starts with Windows, and closing the app stops its work.
+is refused. Closing the app stops its work. Device & diagnostics can explicitly
+enable launch after this Windows user signs in; it does not unlock Windows.
+
+## Unattended access while signed in
+
+Save and verify the controller's full key in Trusted devices, then authorize
+that device for 30 days. The DPAPI-protected grant survives app restarts and
+permits only screen viewing/control. Clipboard, files and chat still require
+local consent. Revoke in Trusted devices to stop sessions and remove authority.
+This is not a Windows service, and does not work on the login/UAC screen.
+
+## Publisher-signed update packages
+
+Device & diagnostics verifies and stages a matching signed manifest and EXE.
+It checks the compiled publisher key, expiry, version and actual bytes. Nothing
+is automatically installed. See [SIGNED_UPDATES.md](SIGNED_UPDATES.md).
 
 ## Not available yet
 
-UAC/login/installed unattended service, H.265/AV1, audio, clipboard,
-printing/Auto Print, recording, VPN, Internet ID lookup, NAT/route failover,
-signed installer and signed updates are absent. See KNOWN_LIMITATIONS.md.
+UAC/login/installed unattended service, H.265/AV1, audio, image/file clipboard,
+printing/Auto Print, recording, VPN, NAT/route failover, Windows Authenticode
+and automatic update delivery are absent. See KNOWN_LIMITATIONS.md.

@@ -1,4 +1,4 @@
-# Known limitations — 0.3.1
+# Known limitations — 0.3.2
 
 This is a functioning native Windows attended remote-desktop development app,
 **not a complete AnyDesk-equivalent product and not production ready**.
@@ -9,8 +9,11 @@ This is a functioning native Windows attended remote-desktop development app,
   public WSS with both endpoints on this laptop. Cross-computer interactive
   desktop and long-running certification remain. H.265/AV1, UAC, secure desktop, login-screen
   support and Ctrl+Alt+Del are not implemented.
-- No installed unattended access, Windows service, tray/background persistence,
-  password/MFA login, reconnect after reboot, audio, image/file clipboard,
+- Unattended view/control now requires an explicit saved 30-day verified-key
+  grant, an open SENSOR GUI, and an unlocked signed-in desktop. It is not a
+  Windows service. Optional sign-in startup reopens the app after login;
+  operating-system reboot, pre-login access and UAC are not verified or supported.
+  No tray/background persistence, password/MFA login, audio, image/file clipboard,
   recording or privacy mode. Text clipboard is explicitly permission-gated
   and bounded; initial clipboard contents are not sent. A visible direct-TCP receiver can explicitly auto-accept one
   already pinned peer while the GUI remains open.
@@ -46,8 +49,10 @@ This is a functioning native Windows attended remote-desktop development app,
   security. A compromised endpoint/current-user account is outside protection.
 - No production security review, extended fuzz campaign, network impairment
   matrix, Windows 10/11/Server certification or 8+ hour stability evidence.
-- No publisher signature, MSI, automatic update mechanism or update server.
-  An unsigned NSIS per-user installer is provided; it is not a Windows service.
+- Publisher-signed offline update manifests and byte-verified staging are
+  implemented. No Windows Authenticode certificate, MSI, automatic update feed,
+  atomic installer rollback, publisher-key rotation/recovery or update server.
+  The NSIS per-user installer remains Authenticode-unsigned; it is not a Windows service.
   No third-party policy or firewall rule was installed.
 - Current executable needs Direct3D 12 and Media Foundation. The Windows C
   runtime is statically linked. Packaging records a CycloneDX SBOM,

@@ -4,7 +4,7 @@ SENSOR TECHNOLOGY · Designed by ENG Mohamed Sayed.
 
 Version **0.3.2 — Windows attended remote-desktop build with Internet
 transport**. The shipped package is configured for the verified Railway
-rendezvous service; this is still an unsigned attended development release,
+rendezvous service; this is still a development release without Authenticode,
 not a complete AnyDesk-equivalent product.
 
 ## Windows app, not a website
@@ -39,6 +39,13 @@ the client.
   updates, and permission-checked mouse/keyboard/text/wheel input. The GUI
   viewport is native egui/wgpu; it is not an HTML canvas or JPEG stream.
 - Local verified contacts, persistent alias, signed incoming-session audit.
+- Explicit, revocable 30-day unattended view/control grants for one verified
+  key while Windows is signed in and unlocked. Windows user-DPAPI binds the
+  grant to the local identity. Clipboard and files still require consent.
+- Optional launch after Windows sign-in (not a pre-login service).
+- Publisher Ed25519-signed offline update verification and staging, with
+  compiled trust anchor, expiry, downgrade, size and SHA-256 checks.
+  See [SIGNED_UPDATES.md](docs/SIGNED_UPDATES.md); Authenticode is separate.
 - Explicitly granted text clipboard synchronization (64 KiB UTF-8 limit),
   with a live disable switch, initial-content suppression and echo prevention.
 - Fit/actual-size viewing and fullscreen; native per-user installer source,

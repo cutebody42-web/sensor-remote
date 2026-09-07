@@ -1,5 +1,7 @@
 # Verification evidence — 0.3.0
 
+Historical record. Current release evidence: [RELEASE_0_3_2.md](RELEASE_0_3_2.md).
+
 ## Latest verified Internet deployment — 2026-09-06
 
 - Private repository source: https://github.com/cutebody42-web/sensor-remote.

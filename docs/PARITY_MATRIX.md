@@ -1,4 +1,23 @@
-# SENSOR Remote Access parity matrix — 0.3.0
+# SENSOR Remote Access parity matrix
+
+## Current 0.3.2 scope
+
+No capability is production-certified. Exact results and failed attempts are
+recorded in [RELEASE_0_3_2.md](RELEASE_0_3_2.md).
+
+| Capability | Current evidence | Remaining gate |
+| --- | --- | --- |
+| Native screen/control | Real public-WSS mouse, Unicode text, wheel, monitor switch and stale-input rejection | Final two-computer acknowledgement and OS/GPU/network matrix |
+| Internet file transfer | Separate Windows computers, 8,388,625 bytes, equal SHA-256 and both success exits | Large/folder/long-run matrix |
+| Text clipboard | Permission-gated, bounded, echo-suppressed native implementation and OS test | Image/file clipboard |
+| Unattended ordinary desktop | Expiring DPAPI verified-key grant; three host restarts, real video and revocation passed | Pre-login/UAC service and actual Windows reboot |
+| Launch after sign-in | Explicit per-user Run value, no auto-login/security setting changes | Actual sign-out/reboot certification |
+| Installer | Per-user NSIS lifecycle, exact-file uninstall and profile preservation | Authenticode/MSI/rollback certification |
+| Signed updates | Compiled Ed25519 publisher key, signed manifest and byte-verified staging; negative tests | Automatic delivery, key recovery/rotation, transactional install |
+
+## Historical baseline — 0.3.0
+
+The rows below record the earlier baseline, not current completion status.
 
 Official behavioral research is recorded in [BENCHMARK_RESEARCH.md](BENCHMARK_RESEARCH.md).
 This is clean-room work: no benchmark source code, private protocol or branding.
