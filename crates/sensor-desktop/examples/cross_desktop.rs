@@ -50,6 +50,31 @@ mod fixture {
             let _ = self.0.wait();
         }
     }
+    fn prepare_control(root: &Path, public: &Path, target: &Path) -> Result<()> {
+        prepare(root, public)?;
+        sensor_windows::desktop::interactive_desktop()?;
+        let _target = Child(
+            std::process::Command::new(target)
+                .env("SENSOR_QA_CLOUD_FOCUS", "1")
+                .arg(root.join("qa-state.json"))
+                .spawn()?,
+        );
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until {
+            if let Ok(bytes) = fs::read(root.join("qa-state.json")) {
+                let state: serde_json::Value = serde_json::from_slice(&bytes)?;
+                if state["focused"] == true
+                    && state["text_focused"] == true
+                    && state["painted_frames"].as_u64().unwrap_or(0) > 5
+                {
+                    fs::write(root.join("target-public.json"), bytes)?;
+                    return Ok(());
+                }
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        Err("Cloud fixture did not establish its own editable focus".into())
+    }
     fn host(root: &Path, peer: ExpectedPeer, target: &Path, input: bool) -> Result<()> {
         // A headless/service/locked runner is an explicit failed prerequisite,
         // never a reason to bypass desktop security or synthesize fake capture.
@@ -86,7 +111,18 @@ mod fixture {
                         (true, sensor_client::Mode::RemoteControl)
                             | (false, sensor_client::Mode::ScreenView)
                     );
-                    let allow = actual == peer && expected_mode;
+                    let fixture_ready = if input {
+                        let state: serde_json::Value =
+                            serde_json::from_slice(&fs::read(root.join("qa-state.json"))?)?;
+                        let published: serde_json::Value =
+                            serde_json::from_slice(&fs::read(root.join("target-public.json"))?)?;
+                        state["focused"] == true
+                            && state["text_focused"] == true
+                            && state["text_center"] == published["text_center"]
+                    } else {
+                        true
+                    };
+                    let allow = actual == peer && expected_mode && fixture_ready;
                     answer.send(allow)?;
                     accepted = allow;
                 }
@@ -253,6 +289,7 @@ mod fixture {
         let args: Vec<_> = std::env::args().skip(1).collect();
         match args.as_slice() {
             [mode, root, public] if mode == "prepare" => prepare(Path::new(root), Path::new(public)),
+            [mode, root, public, target] if mode == "prepare-control" => prepare_control(Path::new(root), Path::new(public), Path::new(target)),
             [mode, root, public] if mode == "view" => view(Path::new(root), Path::new(public), None),
             [mode, root, public, qa] if mode == "view-control" => view(Path::new(root), Path::new(public), Some(Path::new(qa))),
             [mode, root, id, key, target] if mode == "host" || mode == "host-control" => host(Path::new(root), sensor_desktop::peer(id, key)?, Path::new(target), mode == "host-control"),

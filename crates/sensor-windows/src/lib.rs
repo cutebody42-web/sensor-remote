@@ -11,3 +11,5 @@ pub mod codec;
 pub mod desktop;
 #[cfg(windows)]
 pub mod input;
+#[cfg(windows)]
+pub mod startup;

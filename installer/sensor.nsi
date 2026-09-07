@@ -98,6 +98,11 @@ Section "Uninstall"
     SetErrorLevel 1
     Abort
   ${EndIf}
+  ; Remove only the startup value belonging to this exact installation.
+  ReadRegStr $0 HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SENSORRemote"
+  ${If} $0 == '"$INSTDIR\SENSOR-Remote.exe"'
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "SENSORRemote"
+  ${EndIf}
   Delete "$INSTDIR\SENSOR-CLI.exe"
   Delete "$INSTDIR\sensor-network.json"
   Delete "$INSTDIR\LICENSE"

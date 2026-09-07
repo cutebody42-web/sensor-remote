@@ -135,13 +135,30 @@ pub fn stage(
     root: &Path,
     installed: [u32; 3],
 ) -> Result<(PathBuf, Release), String> {
+    stage_with_policy(
+        manifest,
+        installer,
+        root,
+        installed,
+        &publisher_key()?,
+        now()?,
+    )
+}
+fn stage_with_policy(
+    manifest: &Path,
+    installer: &Path,
+    root: &Path,
+    installed: [u32; 3],
+    key: &[u8; 32],
+    time: u64,
+) -> Result<(PathBuf, Release), String> {
     let mut bytes = Vec::new();
     File::open(manifest)
         .map_err(|e| e.to_string())?
         .take(MAX_MANIFEST + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    let release = verify(&bytes, &publisher_key()?, installed, now()?)?;
+    let release = verify(&bytes, key, installed, time)?;
     // Source opened once; changing it while copying produces a hash mismatch.
     let source = File::open(installer).map_err(|e| e.to_string())?;
     if !source.metadata().map_err(|e| e.to_string())?.is_file() {
@@ -177,6 +194,72 @@ pub fn stage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn staged_copy_is_verified_and_failures_leave_no_executable() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("setup.exe");
+        let manifest = root.path().join("release.json");
+        let staging = root.path().join("staging");
+        let k = IdentityKeypair::generate();
+        std::fs::write(&manifest, sign(&release(), &k).unwrap()).unwrap();
+        for bad in [b"HELLO".as_slice(), b"hell", b"hello!"] {
+            std::fs::write(&source, bad).unwrap();
+            assert!(stage_with_policy(
+                &manifest,
+                &source,
+                &staging,
+                [0, 3, 2],
+                &k.public_key(),
+                150
+            )
+            .is_err());
+            assert_eq!(std::fs::read_dir(&staging).unwrap().count(), 0);
+            assert_eq!(std::fs::read(&source).unwrap(), bad);
+        }
+        std::fs::write(&source, b"hello").unwrap();
+        let (path, _) = stage_with_policy(
+            &manifest,
+            &source,
+            &staging,
+            [0, 3, 2],
+            &k.public_key(),
+            150,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"hello");
+        assert!(stage_with_policy(
+            &manifest,
+            &source,
+            &staging,
+            [0, 3, 3],
+            &k.public_key(),
+            150
+        )
+        .is_err());
+    }
+    #[test]
+    fn deterministic_mutation_corpus_never_accepts_changed_signed_metadata() {
+        let k = IdentityKeypair::generate();
+        let original = sign(&release(), &k).unwrap();
+        let envelope: Envelope = serde_json::from_slice(&original).unwrap();
+        for index in 0..envelope.payload.len() {
+            let mut changed: Envelope = serde_json::from_slice(&original).unwrap();
+            changed.payload[index] ^= 1;
+            let bytes = serde_json::to_vec(&changed).unwrap();
+            assert!(verify(&bytes, &k.public_key(), [0, 3, 2], 150).is_err());
+        }
+        for index in 0..64 {
+            let mut changed: Envelope = serde_json::from_slice(&original).unwrap();
+            changed.signature[index] ^= 1;
+            assert!(verify(
+                &serde_json::to_vec(&changed).unwrap(),
+                &k.public_key(),
+                [0, 3, 2],
+                150
+            )
+            .is_err());
+        }
+    }
     fn release() -> Release {
         Release {
             schema: 1,

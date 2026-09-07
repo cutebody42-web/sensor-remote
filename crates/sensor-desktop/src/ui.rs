@@ -1847,6 +1847,40 @@ impl App {
             }
         });
         card(ui, |ui| {
+            ui.label(RichText::new("Reconnect after Windows sign-in").strong());
+            ui.label("Launch this SENSOR executable when this Windows user signs in. It reuses the saved identity and unattended grant. This does not sign you in, unlock Windows, bypass UAC or provide pre-login access.");
+            if let Ok(exe) = std::env::current_exe() {
+                match sensor_windows::startup::enabled(&exe) {
+                    Ok(enabled) => {
+                        if ui
+                            .button(if enabled {
+                                "Disable launch at sign-in"
+                            } else {
+                                "Enable launch at sign-in"
+                            })
+                            .clicked()
+                        {
+                            self.notice = Some(
+                                match sensor_windows::startup::configure(&exe, !enabled) {
+                                    Ok(()) => {
+                                        if enabled {
+                                            "SENSOR sign-in startup disabled.".into()
+                                        } else {
+                                            "SENSOR will launch after this user signs in. Keep this executable at its current location.".into()
+                                        }
+                                    }
+                                    Err(e) => e,
+                                },
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        ui.label(error);
+                    }
+                }
+            }
+        });
+        card(ui, |ui| {
             ui.label(RichText::new("Release status: not production ready").strong());
             ui.label("Available here: persistent identity, attended Internet screen/control, permission-gated text clipboard, encrypted chat, integrity-checked file transfer with explicit reconnect/resume, local contacts, signed incoming-session audit, and a per-user installer.");
             ui.label("Not implemented: unattended Windows service, UAC/login screen, H.265/AV1, audio, printing, Auto Print, VPN, Authenticode signing, automatic update delivery, durable accounts, NAT traversal, and direct/relay failover. Public routing uses temporary Railway trial infrastructure. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
