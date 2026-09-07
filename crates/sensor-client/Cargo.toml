@@ -24,3 +24,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+sensor-render = { path = "../sensor-render" }
+serde_json.workspace = true

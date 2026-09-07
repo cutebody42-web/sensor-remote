@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read, Write},
-    net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -26,6 +30,59 @@ pub const MAX_RELAY_BYTES: usize = 1024 * 1024;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(90);
 const SOCKET_POLL: Duration = Duration::from_millis(5);
 const HEARTBEAT: Duration = Duration::from_secs(25);
+static DNS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+struct DnsSlot;
+impl Drop for DnsSlot {
+    fn drop(&mut self) {
+        DNS_IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// The system resolver can block beyond socket timeouts. Bound the caller's
+/// wait and cancellation independently, and cap outstanding resolver threads.
+fn resolve(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<SocketAddr>, RenderError> {
+    check_cancelled(cancelled)?;
+    if Instant::now() >= deadline {
+        return Err(RenderError::Timeout);
+    }
+    DNS_IN_FLIGHT
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < 4).then_some(count + 1)
+        })
+        .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "DNS resolver capacity reached"))?;
+    let slot = DnsSlot;
+    let host = host.trim_matches(['[', ']']).to_owned();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("sensor-dns".into())
+        .spawn(move || {
+            let _slot = slot;
+            let result = (host.as_str(), port)
+                .to_socket_addrs()
+                .map(|addresses| addresses.take(32).collect());
+            let _ = sender.send(result);
+        })?;
+    loop {
+        check_cancelled(cancelled)?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(RenderError::Timeout);
+        }
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(50))) {
+            Ok(addresses) => return addresses.map_err(RenderError::Io),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(io::Error::other("DNS resolver stopped").into())
+            }
+        }
+    }
+}
 
 type RenderWebSocket = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -199,14 +256,11 @@ fn open(
         } else {
             80
         });
-    let addresses = (host, port)
-        .to_socket_addrs()
-        .map_err(RenderError::Io)?
-        .collect::<Vec<_>>();
+    let deadline = Instant::now() + timeout;
+    let addresses = resolve(host, port, deadline, cancelled)?;
     if addresses.is_empty() {
         return Err(RenderError::Url("WebSocket host has no addresses".into()));
     }
-    let deadline = Instant::now() + timeout;
     let mut delay = Duration::from_millis(250);
     let mut last_error = None;
     loop {
@@ -617,6 +671,32 @@ fn read_until(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dns_resolution_obeys_cancellation_deadline_and_local_address() {
+        let started = Instant::now();
+        assert!(resolve(
+            "example.invalid",
+            443,
+            started + Duration::from_secs(10),
+            &|| true
+        )
+        .is_err());
+        assert!(matches!(
+            resolve("example.invalid", 443, started, &|| false),
+            Err(RenderError::Timeout)
+        ));
+        let addresses = resolve(
+            "127.0.0.1",
+            443,
+            Instant::now() + Duration::from_secs(2),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(
+            addresses,
+            vec!["127.0.0.1:443".parse::<SocketAddr>().unwrap()]
+        );
+    }
     #[test]
     fn registration_message_is_stable_and_hex_is_strict() {
         let bytes = registration_message("123456789", &"ab".repeat(32), &"cd".repeat(32), true);

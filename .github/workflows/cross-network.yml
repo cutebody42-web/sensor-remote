@@ -1,0 +1,56 @@
+name: SENSOR cross-network Windows fixture
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  remote-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Build isolated synthetic endpoint
+        run: cargo build -p sensor-client --example cross_network --locked
+      - name: Start bounded public-WSS test receiver
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $public = Join-Path $env:RUNNER_TEMP 'sensor-cross-network-public.json'
+          $out = Join-Path $env:RUNNER_TEMP 'sensor-cross-network.log'
+          $err = Join-Path $env:RUNNER_TEMP 'sensor-cross-network-errors.log'
+          $fixture = Start-Process -FilePath '.\target\debug\examples\cross_network.exe' -ArgumentList @('host','https://sensor-rendezvous-production.up.railway.app',$public) -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
+          $fixture.Id | Set-Content (Join-Path $env:RUNNER_TEMP 'sensor-cross-network.pid')
+          $until = [DateTime]::UtcNow.AddSeconds(100)
+          while (!(Test-Path -LiteralPath $public) -and [DateTime]::UtcNow -lt $until) {
+            if ($fixture.HasExited) { Get-Content $err; throw 'Fixture stopped before registration' }
+            Start-Sleep -Milliseconds 500
+          }
+          if (!(Test-Path -LiteralPath $public)) { Stop-Process -Id $fixture.Id; throw 'Fixture registration timed out' }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sensor-cross-network-public
+          path: ${{ runner.temp }}/sensor-cross-network-public.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Wait for the laptop synthetic transfer
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'sensor-cross-network.log'
+          $err = Join-Path $env:RUNNER_TEMP 'sensor-cross-network-errors.log'
+          $fixtureId = [int](Get-Content (Join-Path $env:RUNNER_TEMP 'sensor-cross-network.pid'))
+          $until = [DateTime]::UtcNow.AddMinutes(10)
+          while ((Get-Process -Id $fixtureId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $until) { Start-Sleep -Seconds 2 }
+          Get-Content $out
+          Get-Content $err
+          if ((Get-Content $out -Raw) -notmatch 'CROSS_NETWORK_HOST_PASS') { throw 'Remote transfer did not pass' }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sensor-cross-network-evidence
+          path: ${{ runner.temp }}/sensor-cross-network*.log
+          retention-days: 7

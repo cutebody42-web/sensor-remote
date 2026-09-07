@@ -15,7 +15,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender},
         Arc, Mutex,
     },
@@ -27,8 +27,6 @@ use std::{
 use sensor_session::permissions::{Consent, Permissions};
 #[cfg(windows)]
 use sensor_windows::{codec, desktop, input};
-#[cfg(windows)]
-use std::sync::atomic::AtomicU64;
 
 pub enum Event {
     Online(bool),
@@ -97,18 +95,61 @@ pub enum Task {
     Remote {
         route: Route,
         control: bool,
+        clipboard: bool,
     },
 }
 
 #[derive(Clone, Default)]
 pub struct Control {
     cancelled: Arc<AtomicBool>,
+    local_stop: Arc<AtomicBool>,
     socket: Arc<Mutex<Option<ConnectionAbort>>>,
     remote_sender: Arc<Mutex<Option<SyncSender<DesktopMessage>>>>,
     remote_frame: Arc<Mutex<Option<Arc<DecodedFrame>>>>,
+    clipboard_enabled: Arc<AtomicBool>,
+    clipboard_allowed: Arc<AtomicBool>,
+    decoded_frames: Arc<AtomicU64>,
+    video_bytes: Arc<AtomicU64>,
+    rtt_micros: Arc<AtomicU64>,
+    captured_frames: Arc<AtomicU64>,
+    encoded_frames: Arc<AtomicU64>,
 }
 impl Control {
+    pub fn set_clipboard_enabled(&self, enabled: bool) {
+        self.clipboard_enabled
+            .store(enabled && self.clipboard_allowed(), Ordering::SeqCst);
+    }
+    pub fn clipboard_allowed(&self) -> bool {
+        self.clipboard_allowed.load(Ordering::SeqCst)
+    }
+    fn grant_clipboard(&self, allowed: bool) {
+        self.clipboard_allowed.store(allowed, Ordering::SeqCst);
+        self.set_clipboard_enabled(allowed);
+    }
+    pub fn clipboard_enabled(&self) -> bool {
+        self.clipboard_enabled.load(Ordering::SeqCst)
+    }
+    pub fn statistics(&self) -> (u64, u64, u64) {
+        (
+            self.decoded_frames.load(Ordering::Relaxed),
+            self.video_bytes.load(Ordering::Relaxed),
+            self.rtt_micros.load(Ordering::Relaxed),
+        )
+    }
+    pub fn capture_statistics(&self) -> (u64, u64) {
+        (
+            self.captured_frames.load(Ordering::Relaxed),
+            self.encoded_frames.load(Ordering::Relaxed),
+        )
+    }
     pub fn stop(&self) {
+        self.local_stop.store(true, Ordering::SeqCst);
+        self.abort();
+    }
+    pub fn was_stopped_locally(&self) -> bool {
+        self.local_stop.load(Ordering::SeqCst)
+    }
+    fn abort(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
         if let Ok(socket) = self.socket.lock() {
             if let Some(socket) = socket.as_ref() {
@@ -165,6 +206,7 @@ impl Control {
     }
     #[cfg(windows)]
     fn publish_frame(&self, frame: DecodedFrame) {
+        self.decoded_frames.fetch_add(1, Ordering::Relaxed);
         if let Ok(mut current) = self.remote_frame.lock() {
             *current = Some(Arc::new(frame));
         }
@@ -243,6 +285,10 @@ struct Interaction<'a> {
 impl LocalInteraction for Interaction<'_> {
     fn accept(&mut self, peer: ExpectedPeer, mode: Mode) -> bool {
         if self.auto_accept {
+            self.control.grant_clipboard(
+                mode.permissions()
+                    .allows(sensor_session::permissions::Permission::ClipboardText),
+            );
             let _ = self.events.send(Event::Status(format!(
                 "Auto-accepted {mode:?} session • pinned peer {} • explicit local profile",
                 peer.device_id
@@ -252,6 +298,12 @@ impl LocalInteraction for Interaction<'_> {
         let (sender, receiver) = mpsc::sync_channel(1);
         let accepted = self.events.send(Event::Consent(peer, mode, sender)).is_ok()
             && wait_reply(receiver, self.control).unwrap_or(false);
+        if accepted {
+            self.control.grant_clipboard(
+                mode.permissions()
+                    .allows(sensor_session::permissions::Permission::ClipboardText),
+            );
+        }
         let _ = self.events.send(Event::Status(if accepted {
             format!(
                 "Active {mode:?} session • peer {} • {} • ChaCha20-Poly1305",
@@ -488,10 +540,12 @@ fn execute(
         Task::Remote {
             route,
             control: remote_control,
+            clipboard,
         } => {
             return execute_remote(
                 route.clone(),
                 *remote_control,
+                *clipboard,
                 identity,
                 peer,
                 events,
@@ -563,6 +617,36 @@ enum HostCommand {
     Pong(u64),
     Close,
     Failed(String),
+    Clipboard(String),
+}
+
+#[cfg(windows)]
+struct InputTarget {
+    generation: u64,
+    display: Display,
+}
+
+#[cfg(windows)]
+struct HostCommands(SyncSender<HostCommand>, Control);
+#[cfg(windows)]
+impl HostCommands {
+    fn send(&self, command: HostCommand) -> Result<(), mpsc::TrySendError<HostCommand>> {
+        let result = self.0.try_send(command);
+        if result.is_err() {
+            // A stalled or flooding peer must not block shutdown or leave input held.
+            self.1.abort();
+        }
+        result
+    }
+}
+
+#[cfg(windows)]
+struct DesktopStop(Control);
+#[cfg(windows)]
+impl Drop for DesktopStop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[cfg(windows)]
@@ -575,16 +659,56 @@ fn desktop_message(
 }
 
 #[cfg(windows)]
+fn send_video_packets(
+    writer: &mut sensor_transport::connection::SecureWriter,
+    packets: Vec<sensor_media::EncodedFrame>,
+    generation: u64,
+    control: &Control,
+) -> Result<(), sensor_client::EndpointError> {
+    for packet in packets {
+        let total = u32::try_from(packet.bytes.len()).map_err(|_| {
+            sensor_client::EndpointError::Desktop("Encoded frame is too large.".into())
+        })?;
+        for (index, bytes) in packet
+            .bytes
+            .chunks(sensor_media::VIDEO_FRAGMENT)
+            .enumerate()
+        {
+            let offset = index
+                .checked_mul(sensor_media::VIDEO_FRAGMENT)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| {
+                    sensor_client::EndpointError::Desktop("Encoded frame offset overflow.".into())
+                })?;
+            desktop_message(
+                writer,
+                DesktopMessage::Fragment {
+                    generation,
+                    sequence: packet.timestamp_100ns as u64,
+                    timestamp_100ns: packet.timestamp_100ns,
+                    keyframe: packet.keyframe,
+                    offset,
+                    total,
+                    bytes: bytes.to_vec(),
+                },
+            )?;
+        }
+        control.encoded_frames.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn spawn_host_reader(
     mut reader: sensor_transport::connection::SecureReader,
     commands: SyncSender<HostCommand>,
     control: Control,
     displays: Arc<Vec<Display>>,
-    active: Arc<Mutex<Display>>,
-    generation: Arc<AtomicU64>,
+    active: Arc<Mutex<InputTarget>>,
     permissions: Permissions,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
+        let commands = HostCommands(commands, control.clone());
         let mut injector = input::Injector::default();
         let mut local_consent = Consent::pending(permissions);
         if local_consent.accept(permissions).is_err() {
@@ -611,11 +735,8 @@ fn spawn_host_reader(
                     generation: input_generation,
                     event,
                 }) => {
-                    if input_generation != generation.load(Ordering::SeqCst) {
-                        continue;
-                    }
-                    let display = match active.lock() {
-                        Ok(display) => display.clone(),
+                    let target = match active.lock() {
+                        Ok(target) => target,
                         Err(_) => {
                             let _ = commands.send(HostCommand::Failed(
                                 "Remote display state became unavailable.".into(),
@@ -623,24 +744,30 @@ fn spawn_host_reader(
                             break;
                         }
                     };
-                    if let Err(error) = injector.apply(&event, &display, &local_consent) {
+                    if target.generation == 0 || input_generation != target.generation {
+                        continue;
+                    }
+                    // Keep the target locked through injection: generation and
+                    // coordinates must always describe the same selected display.
+                    if let Err(error) = injector.apply(&event, &target.display, &local_consent) {
                         let _ = commands.send(HostCommand::Failed(error.to_string()));
                         break;
                     }
                 }
                 Message::Desktop(DesktopMessage::SelectDisplay(index)) => {
-                    let Some(display) = displays.iter().find(|display| display.index == index)
-                    else {
+                    if !displays.iter().any(|display| display.index == index) {
                         let _ =
                             commands.send(HostCommand::Failed("Unknown monitor selected.".into()));
                         break;
-                    };
+                    }
                     if let Err(error) = injector.release() {
                         let _ = commands.send(HostCommand::Failed(error.to_string()));
                         break;
                     }
-                    if let Ok(mut active_display) = active.lock() {
-                        *active_display = display.clone();
+                    if let Ok(mut target) = active.lock() {
+                        // Ignore in-flight coordinates until capture and the
+                        // advertised format have switched together.
+                        target.generation = 0;
                     } else {
                         let _ = commands.send(HostCommand::Failed(
                             "Remote display state became unavailable.".into(),
@@ -653,6 +780,21 @@ fn spawn_host_reader(
                 }
                 Message::Desktop(DesktopMessage::Ping(value)) => {
                     if commands.send(HostCommand::Pong(value)).is_err() {
+                        break;
+                    }
+                }
+                Message::Desktop(DesktopMessage::ClipboardText(text)) => {
+                    if local_consent
+                        .require(sensor_session::permissions::Permission::ClipboardText)
+                        .is_err()
+                        || sensor_media::validate_clipboard(&text).is_err()
+                    {
+                        let _ = commands.send(HostCommand::Failed(
+                            "Clipboard permission denied or invalid text.".into(),
+                        ));
+                        break;
+                    }
+                    if commands.send(HostCommand::Clipboard(text)).is_err() {
                         break;
                     }
                 }
@@ -680,6 +822,8 @@ fn host_desktop(
     control: &Control,
     internet: bool,
 ) -> Result<(), sensor_client::EndpointError> {
+    // Every return path must abort the blocking reader and release held input.
+    let _stop = DesktopStop(control.clone());
     let displays = desktop::displays(consent).map_err(|error| {
         sensor_client::EndpointError::Desktop(format!("Cannot enumerate displays: {error}"))
     })?;
@@ -694,8 +838,10 @@ fn host_desktop(
     let (reader, mut writer) = connection.split()?;
     desktop_message(&mut writer, DesktopMessage::Displays(displays.clone()))?;
 
-    let active = Arc::new(Mutex::new(displays[0].clone()));
-    let generation_shared = Arc::new(AtomicU64::new(generation));
+    let active = Arc::new(Mutex::new(InputTarget {
+        generation,
+        display: displays[0].clone(),
+    }));
     let (commands, command_receiver) = mpsc::sync_channel(64);
     let reader_thread = spawn_host_reader(
         reader,
@@ -703,7 +849,6 @@ fn host_desktop(
         control.clone(),
         Arc::new(displays.clone()),
         active.clone(),
-        generation_shared.clone(),
         permissions,
     );
 
@@ -734,8 +879,11 @@ fn host_desktop(
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
         if internet {
             let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
-            width = (((width as f64 * scale) as u32) & !1).max(2);
-            height = (((height as f64 * scale) as u32) & !1).max(2);
+            // Keep macroblock alignment after downscaling as well. Otherwise
+            // hardware H.264 decoders expose padded output dimensions that do
+            // not match the advertised frame and its NV12 plane offsets.
+            width = (((width as f64 * scale) as u32) & !15).max(16);
+            height = (((height as f64 * scale) as u32) & !15).max(16);
         }
         let fps = if internet { 15 } else { 30 };
         let bitrate = if internet { 1_500_000 } else { 4_000_000 };
@@ -763,11 +911,22 @@ fn host_desktop(
     let mut last_cursor_at = Instant::now() - Duration::from_millis(101);
     let mut last_cursor = None;
     let capture_started = Instant::now();
+    let mut clipboard = sensor_windows::clipboard::TextClipboard::default();
+    let mut clipboard_at = Instant::now();
     let result = (|| loop {
         if control.is_stopped() {
             return Ok(());
         }
-        while let Ok(command) = command_receiver.try_recv() {
+        // Hardware MFT output arrives asynchronously. Poll even on a static
+        // desktop, otherwise the first frame can remain buffered indefinitely.
+        let pending = encoder
+            .available()
+            .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
+        send_video_packets(&mut writer, pending, generation, control)?;
+        for _ in 0..64 {
+            let Ok(command) = command_receiver.try_recv() else {
+                break;
+            };
             match command {
                 HostCommand::SelectDisplay(index) => {
                     if index >= displays.len() as u32 {
@@ -778,14 +937,19 @@ fn host_desktop(
                     let next_generation = generation.saturating_add(1);
                     let (next_capture, next_encoder, next_format) = setup(index, next_generation)?;
                     generation = next_generation;
-                    generation_shared.store(generation, Ordering::SeqCst);
-                    if let Ok(mut current) = active.lock() {
-                        *current = next_capture.display.clone();
-                    }
                     capture = next_capture;
                     encoder = next_encoder;
                     format = next_format;
                     desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
+                    let mut current = active.lock().map_err(|_| {
+                        sensor_client::EndpointError::Desktop(
+                            "Remote display state became unavailable.".into(),
+                        )
+                    })?;
+                    *current = InputTarget {
+                        generation,
+                        display: capture.display.clone(),
+                    };
                 }
                 HostCommand::Pong(value) => {
                     desktop_message(&mut writer, DesktopMessage::Pong(value))?;
@@ -797,7 +961,16 @@ fn host_desktop(
                 HostCommand::Failed(error) => {
                     return Err(sensor_client::EndpointError::Desktop(error));
                 }
+                HostCommand::Clipboard(text) => {
+                    let _ = clipboard.apply(&text, control.clipboard_enabled(), consent);
+                }
             }
+        }
+        if clipboard_at.elapsed() >= Duration::from_millis(250) {
+            if let Some(text) = clipboard.poll(control.clipboard_enabled(), consent) {
+                desktop_message(&mut writer, DesktopMessage::ClipboardText(text))?;
+            }
+            clipboard_at = Instant::now();
         }
         if last_frame.elapsed() >= Duration::from_secs_f64(1.0 / format.fps_limit as f64) {
             match capture
@@ -805,6 +978,7 @@ fn host_desktop(
                 .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?
             {
                 Some(frame) => {
+                    control.captured_frames.fetch_add(1, Ordering::Relaxed);
                     let frame = sensor_media::rotate_scale_bgra(
                         frame,
                         capture.rotation,
@@ -820,42 +994,10 @@ fn host_desktop(
                         .as_micros()
                         .saturating_mul(10)
                         .min(i64::MAX as u128) as i64;
-                    for packet in encoder
-                        .encode(&nv12, timestamp)
-                        .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?
-                    {
-                        let total = u32::try_from(packet.bytes.len()).map_err(|_| {
-                            sensor_client::EndpointError::Desktop(
-                                "Encoded frame is too large.".into(),
-                            )
-                        })?;
-                        for (offset, bytes) in packet
-                            .bytes
-                            .chunks(sensor_media::VIDEO_FRAGMENT)
-                            .enumerate()
-                        {
-                            let offset = offset
-                                .checked_mul(sensor_media::VIDEO_FRAGMENT)
-                                .and_then(|value| u32::try_from(value).ok())
-                                .ok_or_else(|| {
-                                    sensor_client::EndpointError::Desktop(
-                                        "Encoded frame offset overflow.".into(),
-                                    )
-                                })?;
-                            desktop_message(
-                                &mut writer,
-                                DesktopMessage::Fragment {
-                                    generation,
-                                    sequence: packet.timestamp_100ns as u64,
-                                    timestamp_100ns: packet.timestamp_100ns,
-                                    keyframe: packet.keyframe,
-                                    offset,
-                                    total,
-                                    bytes: bytes.to_vec(),
-                                },
-                            )?;
-                        }
-                    }
+                    let packets = encoder.encode(&nv12, timestamp).map_err(|error| {
+                        sensor_client::EndpointError::Desktop(error.to_string())
+                    })?;
+                    send_video_packets(&mut writer, packets, generation, control)?;
                     last_frame = Instant::now();
                 }
                 None => thread::sleep(Duration::from_millis(1)),
@@ -882,7 +1024,9 @@ fn host_desktop(
             last_cursor_at = Instant::now();
         }
     })();
+    control.abort();
     drop(writer);
+    drop(command_receiver);
     let _ = reader_thread.join();
     result
 }
@@ -891,6 +1035,7 @@ fn host_desktop(
 fn execute_remote(
     route: Route,
     control_mode: bool,
+    clipboard_mode: bool,
     identity: DeviceIdentity,
     peer: ExpectedPeer,
     events: &SyncSender<Event>,
@@ -909,10 +1054,11 @@ fn execute_remote(
     connection
         .set_timeout(Duration::from_secs(120))
         .map_err(|error| error.to_string())?;
-    let mode = if control_mode {
-        Mode::RemoteControl
-    } else {
-        Mode::ScreenView
+    let mode = match (control_mode, clipboard_mode) {
+        (true, true) => Mode::RemoteControlClipboard,
+        (false, true) => Mode::ScreenViewClipboard,
+        (true, false) => Mode::RemoteControl,
+        (false, false) => Mode::ScreenView,
     };
     sensor_client::request(&mut connection, mode).map_err(|error| error.to_string())?;
     events
@@ -924,35 +1070,58 @@ fn execute_remote(
         .map_err(|_| "Window closed".to_owned())?;
     let (mut reader, mut writer) = connection.split().map_err(|error| error.to_string())?;
     let (commands, command_receiver) = mpsc::sync_channel(256);
+    let (clipboard_send, clipboard_receive) = mpsc::sync_channel::<String>(1);
+    control.grant_clipboard(clipboard_mode);
     control.set_remote_sender(commands.clone());
     let writer_control = control.clone();
+    let session_clock = Instant::now();
     let writer_thread = thread::spawn(move || {
         let mut last_ping = Instant::now();
+        let mut clipboard_at = Instant::now();
+        let mut clipboard = sensor_windows::clipboard::TextClipboard::default();
+        let mut consent = Consent::pending(mode.permissions());
+        if consent.accept(mode.permissions()).is_err() {
+            writer_control.abort();
+            return;
+        }
         loop {
             if writer_control.is_stopped() {
                 break;
             }
-            match command_receiver.recv_timeout(Duration::from_millis(100)) {
-                Ok(message) => {
-                    if writer.send(&Message::Desktop(message)).is_err() {
-                        writer_control.stop();
+            if let Ok(text) = clipboard_receive.try_recv() {
+                let _ = clipboard.apply(&text, writer_control.clipboard_enabled(), &consent);
+            }
+            if clipboard_at.elapsed() >= Duration::from_millis(250) {
+                if let Some(text) = clipboard.poll(writer_control.clipboard_enabled(), &consent) {
+                    if writer
+                        .send(&Message::Desktop(DesktopMessage::ClipboardText(text)))
+                        .is_err()
+                    {
+                        writer_control.abort();
                         break;
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if last_ping.elapsed() >= Duration::from_secs(5) {
-                        if writer
-                            .send(&Message::Desktop(DesktopMessage::Ping(
-                                Instant::now().elapsed().as_nanos() as u64,
-                            )))
-                            .is_err()
-                        {
-                            writer_control.stop();
-                            break;
-                        }
-                        last_ping = Instant::now();
+                clipboard_at = Instant::now();
+            }
+            if last_ping.elapsed() >= Duration::from_secs(2) {
+                let stamp = session_clock.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                if writer
+                    .send(&Message::Desktop(DesktopMessage::Ping(stamp)))
+                    .is_err()
+                {
+                    writer_control.abort();
+                    break;
+                }
+                last_ping = Instant::now();
+            }
+            match command_receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(message) => {
+                    if writer.send(&Message::Desktop(message)).is_err() {
+                        writer_control.abort();
+                        break;
                     }
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
@@ -968,6 +1137,9 @@ fn execute_remote(
             };
             match message {
                 Message::Desktop(DesktopMessage::Displays(displays)) => {
+                    if displays.is_empty() || displays.len() > 64 {
+                        return Err("Invalid monitor list".into());
+                    }
                     for display in &displays {
                         display.validate().map_err(|error| error.to_string())?;
                     }
@@ -991,6 +1163,9 @@ fn execute_remote(
                     else {
                         continue;
                     };
+                    control
+                        .video_bytes
+                        .fetch_add(frame.bytes.len() as u64, Ordering::Relaxed);
                     let decoder = decoder
                         .as_mut()
                         .ok_or_else(|| "Received video before its format.".to_owned())?;
@@ -1007,7 +1182,20 @@ fn execute_remote(
                     let _ = commands.try_send(DesktopMessage::Pong(value));
                 }
                 Message::Desktop(DesktopMessage::Close) | Message::Close => break Ok(()),
-                Message::Desktop(DesktopMessage::Pong(_)) => {}
+                Message::Desktop(DesktopMessage::Pong(stamp)) => {
+                    let now = session_clock.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                    if let Some(rtt) = now.checked_sub(stamp) {
+                        control.rtt_micros.store(rtt, Ordering::Relaxed);
+                    }
+                }
+                Message::Desktop(DesktopMessage::ClipboardText(text)) => {
+                    if !clipboard_mode || sensor_media::validate_clipboard(&text).is_err() {
+                        return Err("Clipboard permission denied or invalid text.".into());
+                    }
+                    if control.clipboard_enabled() {
+                        let _ = clipboard_send.try_send(text);
+                    }
+                }
                 Message::Desktop(DesktopMessage::Error(error)) => return Err(error),
                 Message::Desktop(DesktopMessage::Input { .. })
                 | Message::Desktop(DesktopMessage::SelectDisplay(_)) => {
@@ -1018,7 +1206,7 @@ fn execute_remote(
         }
     })();
     control.clear_remote_sender();
-    control.stop();
+    control.abort();
     drop(commands);
     let _ = writer_thread.join();
     result.map(|()| "Remote desktop session closed.".into())
@@ -1028,6 +1216,7 @@ fn execute_remote(
 fn execute_remote(
     _route: Route,
     _control_mode: bool,
+    _clipboard_mode: bool,
     _identity: DeviceIdentity,
     _peer: ExpectedPeer,
     _events: &SyncSender<Event>,
@@ -1039,6 +1228,26 @@ fn execute_remote(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn full_host_queue_aborts_without_blocking_or_marking_local_stop() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let control = Control::default();
+        let commands = HostCommands(sender, control.clone());
+        assert!(commands.send(HostCommand::Pong(1)).is_ok());
+        assert!(commands.send(HostCommand::Pong(2)).is_err());
+        assert!(control.is_stopped());
+        assert!(!control.was_stopped_locally());
+    }
+    #[test]
+    fn internal_cleanup_does_not_disable_listener_reconnection() {
+        let control = Control::default();
+        control.abort();
+        assert!(control.is_stopped());
+        assert!(!control.was_stopped_locally());
+        control.stop();
+        assert!(control.was_stopped_locally());
+    }
     #[test]
     fn cancelling_a_listener_releases_the_socket_and_finishes() {
         let dir = tempfile::tempdir().unwrap();

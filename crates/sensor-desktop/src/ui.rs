@@ -59,14 +59,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let contacts = settings::load(&config.join("contacts.json"))?;
     let receive = config.join("Received Files");
     std::fs::create_dir_all(&receive)?;
-    let render_server = std::env::var("SENSOR_SERVER")
-        .or_else(|_| std::env::var("SENSOR_WS"))
-        .ok()
-        .or(settings::load_network(&config.join("sensor-network.json"))?)
-        .or(settings::load_network(
-            &std::env::current_exe()?.with_file_name("sensor-network.json"),
-        )?)
-        .unwrap_or_default();
+    let render_server = settings::resolve_network(
+        std::env::var("SENSOR_SERVER")
+            .or_else(|_| std::env::var("SENSOR_WS"))
+            .ok(),
+        &config.join("sensor-network.json"),
+        &std::env::current_exe()?.with_file_name("sensor-network.json"),
+    )?
+    .unwrap_or_default();
     let render_mode = std::env::var("SENSOR_MODE")
         .map(|mode| mode.eq_ignore_ascii_case("RENDER_TEST"))
         .unwrap_or(!render_server.is_empty());
@@ -78,8 +78,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 790.0])
-            .with_min_inner_size([880.0, 660.0])
+            .with_inner_size([1050.0, 650.0])
+            .with_min_inner_size([800.0, 540.0])
             .with_icon(icon)
             .with_app_id("SENSOR.Remote"),
         renderer: eframe::Renderer::Wgpu,
@@ -139,7 +139,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 use_render: render_mode,
                 render_server,
                 auto_accept: false,
-                allow_unpinned: false,
+                allow_unpinned: true,
                 confirmed: false,
                 receive,
                 file: None,
@@ -165,11 +165,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 verified_audit: None,
                 remote_frame: None,
                 remote_texture: None,
+                uploaded_frame: None,
                 remote_displays: Vec::new(),
                 remote_format: None,
                 remote_cursor: None,
                 remote_generation: 0,
                 remote_control: false,
+                request_clipboard: false,
+                actual_size: false,
+                fullscreen: false,
                 remote_source_listener: false,
                 remote_buttons: [false; 3],
                 remote_focused: false,
@@ -233,11 +237,15 @@ struct App {
     verified_audit: Option<String>,
     remote_frame: Option<Arc<DecodedFrame>>,
     remote_texture: Option<egui::TextureHandle>,
+    uploaded_frame: Option<Arc<DecodedFrame>>,
     remote_displays: Vec<Display>,
     remote_format: Option<VideoFormat>,
     remote_cursor: Option<(i32, i32, bool)>,
     remote_generation: u64,
     remote_control: bool,
+    request_clipboard: bool,
+    actual_size: bool,
+    fullscreen: bool,
     remote_source_listener: bool,
     remote_buttons: [bool; 3],
     remote_focused: bool,
@@ -396,7 +404,8 @@ impl App {
     fn ready(&self) -> bool {
         self.job.is_none()
             && !self.listener_busy
-            && self.confirmed
+            && (self.confirmed
+                || (self.use_render && self.allow_unpinned && self.peer_key.trim().is_empty()))
             && (peer(&self.peer_id, &self.peer_key).is_ok()
                 || (self.allow_unpinned
                     && !self.peer_id.trim().is_empty()
@@ -413,16 +422,7 @@ impl App {
                     && self.peer_id.trim().is_empty()))
     }
     fn unpinned_peer(&self, id: &str) -> Result<ExpectedPeer, String> {
-        let id: String = id.chars().filter(|c| !c.is_whitespace()).collect();
-        let device_id = DeviceId::try_from(
-            id.parse::<u32>()
-                .map_err(|_| "Enter the nine-digit device ID.".to_owned())?,
-        )
-        .map_err(|error| error.to_string())?;
-        Ok(ExpectedPeer {
-            device_id,
-            public_key: [0; 32],
-        })
+        settings::known_peer(id, "", &self.contacts)
     }
     fn expected_peer(&self, host_any: bool) -> Result<ExpectedPeer, String> {
         if self.allow_unpinned && self.peer_key.trim().is_empty() {
@@ -435,7 +435,7 @@ impl App {
             }
             return self.unpinned_peer(&self.peer_id);
         }
-        peer(&self.peer_id, &self.peer_key)
+        settings::known_peer(&self.peer_id, &self.peer_key, &self.contacts)
     }
     fn relay_route(&self) -> Result<Route, String> {
         if self.allow_unpinned && self.peer_key.trim().is_empty() {
@@ -717,9 +717,9 @@ impl App {
                         if source_listener {
                             self.listener_busy = true;
                         }
-                        if matches!(mode, Mode::ScreenView | Mode::RemoteControl) {
+                        if mode.is_desktop() {
                             self.page = Page::Remote;
-                            self.remote_control = matches!(mode, Mode::RemoteControl);
+                            self.remote_control = mode.controls_input();
                             self.remote_source_listener = source_listener;
                         }
                         self.consent = Some(ConsentPrompt {
@@ -771,7 +771,7 @@ impl App {
                         let stopped = self
                             .listener
                             .as_ref()
-                            .is_some_and(|listener| listener.control.is_stopped());
+                            .is_some_and(|listener| listener.control.was_stopped_locally());
                         self.listener = None;
                         self.listener_busy = false;
                         self.clear_session_state(true);
@@ -789,7 +789,7 @@ impl App {
                         let stopped = self
                             .job
                             .as_ref()
-                            .is_some_and(|job| job.control.is_stopped());
+                            .is_some_and(|job| job.control.was_stopped_locally());
                         self.job = None;
                         self.clear_session_state(false);
                         self.started = None;
@@ -844,13 +844,16 @@ impl App {
         }
     }
 
-    fn send_remote(&mut self, event: Input) -> bool {
-        let control = if self.remote_source_listener {
+    fn active_remote_control(&self) -> Option<worker::Control> {
+        if self.remote_source_listener {
             self.listener.as_ref().map(|job| job.control.clone())
         } else {
             self.job.as_ref().map(|job| job.control.clone())
-        };
-        let Some(control) = control else {
+        }
+    }
+
+    fn send_remote(&mut self, event: Input) -> bool {
+        let Some(control) = self.active_remote_control() else {
             return false;
         };
         let generation = self.remote_generation;
@@ -889,6 +892,10 @@ impl App {
     }
     fn peer_form(&mut self, ui: &mut egui::Ui) {
         let mut changed = field(ui, "REMOTE DEVICE ID", &mut self.peer_id, "123 456 789");
+        if self.use_render {
+            ui.label(RichText::new("Enter the ID shown on the other computer. Its owner must approve. Saved device keys are checked automatically.").size(12.0).color(MUTED));
+        }
+        ui.collapsing("Advanced identity verification", |ui| {
         changed |= field(
             ui,
             "VERIFIED PUBLIC KEY",
@@ -914,6 +921,7 @@ impl App {
             },
         );
         ui.label(RichText::new(if self.allow_unpinned { "A device ID alone does not prove identity; approve only a person you recognize and compare the full fingerprint before future connections." } else { "The ID alone does not prove identity. Compare the full key over a trusted channel." }).size(12.0).color(MUTED));
+        });
     }
     fn connect(&mut self, ui: &mut egui::Ui) {
         title(
@@ -948,7 +956,7 @@ impl App {
         card(ui, |ui| {
             ui.add_enabled_ui(self.job.is_none(), |ui| self.peer_form(ui));
             ui.separator();
-            ui.label(RichText::new("CONNECTION PATH").strong());
+            ui.collapsing("Network settings", |ui| {
             ui.horizontal(|ui| {
                 if ui
                     .radio(!self.use_relay && !self.use_render, "Direct TCP")
@@ -965,7 +973,7 @@ impl App {
                     self.use_render = false;
                 }
                 if ui
-                    .radio(self.use_render, "Render test (HTTPS/WSS)")
+                    .radio(self.use_render, "Internet (HTTPS/WSS)")
                     .clicked()
                 {
                     self.use_render = true;
@@ -977,9 +985,9 @@ impl App {
                     ui,
                     "SENSOR SERVER",
                     &mut self.render_server,
-                    "https://sensor-test.onrender.com",
+                    "https://your-sensor-server.example",
                 );
-                ui.label(RichText::new("The temporary cloud path registers this device by ID and relays the already-encrypted SENSOR stream over WSS. Render Free may cold-start; SENSOR retries are handled by the service profile.").size(12.0).color(MUTED));
+                ui.label(RichText::new("The configured server registers this device by ID and relays end-to-end encrypted sessions. The current hosting allowance is temporary.").size(12.0).color(MUTED));
             } else if self.use_relay {
                 field(
                     ui,
@@ -995,12 +1003,13 @@ impl App {
                 );
                 ui.label(RichText::new("Both endpoints must use the same relay address/key, and the relay operator must provision both verified endpoint keys.").size(12.0).color(MUTED));
             }
+            });
             ui.separator();
             ui.columns(2, |columns| {
                 columns[0].label(RichText::new("Connect to a device").strong());
                 if self.use_render {
                     columns[0].label(
-                        RichText::new("The Render server above is used for Device ID lookup and WSS relay.")
+                        RichText::new("Connect over the Internet by device ID. No LAN address or port forwarding required.")
                             .size(12.0)
                             .color(MUTED),
                     );
@@ -1029,6 +1038,7 @@ impl App {
                         Ok(route) => self.begin(Task::Remote {
                             route,
                             control: false,
+                            clipboard: self.request_clipboard,
                         }),
                         Err(error) => self.notice = Some(error),
                     }
@@ -1045,14 +1055,17 @@ impl App {
                         Ok(route) => self.begin(Task::Remote {
                             route,
                             control: true,
+                            clipboard: self.request_clipboard,
                         }),
                         Err(error) => self.notice = Some(error),
                     }
                 }
+                columns[0].checkbox(&mut self.request_clipboard, "Request text clipboard sharing");
+                columns[0].label(RichText::new("Off by default. The host must approve clipboard access.").size(12.0).color(MUTED));
                 columns[1].label(RichText::new("Receive a connection").strong());
                 if self.use_render {
                     columns[1].label(
-                        RichText::new("This endpoint waits for its online Device ID session through Render WSS.")
+                        RichText::new("Share your ID. Keep SENSOR open and approve only requests you expect.")
                             .size(12.0)
                             .color(MUTED),
                     );
@@ -1070,7 +1083,7 @@ impl App {
                             .color(MUTED),
                     );
                 }
-                columns[1].add_enabled_ui(!self.allow_unpinned, |ui| {
+                columns[1].add_enabled_ui(!self.allow_unpinned && !self.use_render, |ui| {
                     ui.checkbox(
                         &mut self.auto_accept,
                         "Auto-accept this pinned peer while SENSOR is open",
@@ -1114,7 +1127,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new("Remote desktop is attended: the other Windows user must approve View or Control. Direct TCP needs a reachable address and firewall rule; the provisioned relay keeps endpoint traffic encrypted while forwarding it.").size(12.0).color(MUTED));
+            ui.label(RichText::new("SENSOR must be running on both Windows computers. The remote owner must approve each Internet session. Unattended access is not available in this build.").size(12.0).color(MUTED));
         });
     }
     fn files(&mut self, ui: &mut egui::Ui) {
@@ -1270,6 +1283,34 @@ impl App {
         });
     }
     fn remote(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Disconnect").clicked() {
+                self.stop();
+            }
+            if ui.checkbox(&mut self.fullscreen, "Fullscreen").changed() {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+            }
+            ui.checkbox(&mut self.actual_size, "Actual size");
+            if let Some(control) = self.active_remote_control() {
+                let mut enabled = control.clipboard_enabled();
+                if ui
+                    .add_enabled(
+                        control.clipboard_allowed(),
+                        egui::Checkbox::new(&mut enabled, "Text clipboard"),
+                    )
+                    .on_hover_text("Requires text clipboard permission approved by the host.")
+                    .changed()
+                {
+                    control.set_clipboard_enabled(enabled);
+                }
+                let (frames, bytes, rtt) = control.statistics();
+                ui.label(format!("{frames} decoded frames · {bytes} video bytes"));
+                if rtt > 0 {
+                    ui.label(format!("RTT {:.1} ms", rtt as f64 / 1000.0));
+                }
+            }
+        });
         let mode_label = if self.remote_control {
             "control enabled"
         } else {
@@ -1337,30 +1378,50 @@ impl App {
                 ui.label(RichText::new("No video frame received yet.").color(MUTED));
                 return;
             };
-            let dimensions = [frame.width as usize, frame.height as usize];
-            let image = egui::ColorImage::from_rgba_unmultiplied(dimensions, &frame.rgba);
-            if let Some(texture) = &mut self.remote_texture {
-                texture.set(image, egui::TextureOptions::LINEAR);
-            } else {
-                self.remote_texture = Some(ui.ctx().load_texture(
-                    "SENSOR remote desktop",
-                    image,
-                    egui::TextureOptions::LINEAR,
-                ));
+            if self.remote_texture.is_none()
+                || !self
+                    .uploaded_frame
+                    .as_ref()
+                    .is_some_and(|previous| Arc::ptr_eq(previous, &frame))
+            {
+                let dimensions = [frame.width as usize, frame.height as usize];
+                let image = egui::ColorImage::from_rgba_unmultiplied(dimensions, &frame.rgba);
+                if let Some(texture) = &mut self.remote_texture {
+                    texture.set(image, egui::TextureOptions::LINEAR);
+                } else {
+                    self.remote_texture = Some(ui.ctx().load_texture(
+                        "SENSOR remote desktop",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+                self.uploaded_frame = Some(frame.clone());
             }
             let available = ui.available_size();
             let aspect = frame.width as f32 / frame.height as f32;
             let width = available.x.max(120.0);
             let height = (width / aspect).min(available.y.max(160.0));
-            let size = Vec2::new(width.min(height * aspect), height);
-            let response = ui.add(
-                egui::Image::new((
-                    self.remote_texture.as_ref().expect("texture created").id(),
-                    size,
-                ))
-                .fit_to_exact_size(size)
-                .sense(egui::Sense::click_and_drag()),
-            );
+            let size = if self.actual_size {
+                Vec2::new(frame.width as f32, frame.height as f32) / ui.ctx().pixels_per_point()
+            } else {
+                Vec2::new(width.min(height * aspect), height)
+            };
+            let Some(texture) = self.remote_texture.as_ref() else {
+                ui.label("The video texture is unavailable.");
+                return;
+            };
+            let response = egui::ScrollArea::both()
+                .id_salt("remote-video-pan")
+                .auto_shrink([false, false])
+                .max_height(available.y.max(160.0))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Image::new((texture.id(), size))
+                            .fit_to_exact_size(size)
+                            .sense(egui::Sense::click_and_drag()),
+                    )
+                })
+                .inner;
             if response.clicked() {
                 response.request_focus();
             }
@@ -1645,8 +1706,8 @@ impl App {
         });
         card(ui, |ui| {
             ui.label(RichText::new("Release status: not production ready").strong());
-            ui.label("Available here: persistent identity, attended encrypted chat, integrity-checked file send/receive, explicit reconnect-and-resume, local contacts, signed incoming-session audit.");
-            ui.label("Not implemented: installed Windows service, UAC/login screen, H.265/AV1, audio, clipboard, printing, Auto Print, VPN, signed installers/updates, durable accounts, NAT traversal, and direct/relay failover. Temporary Render Internet routing is available when SENSOR_MODE=RENDER_TEST and SENSOR_SERVER are configured. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
+            ui.label("Available here: persistent identity, attended Internet screen/control, permission-gated text clipboard, encrypted chat, integrity-checked file transfer with explicit reconnect/resume, local contacts, signed incoming-session audit, and a per-user installer.");
+            ui.label("Not implemented: unattended Windows service, UAC/login screen, H.265/AV1, audio, printing, Auto Print, VPN, signed installers/updates, durable accounts, NAT traversal, and direct/relay failover. Public routing uses temporary Railway trial infrastructure. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
             ui.label(
                 RichText::new("Designed by ENG Mohamed Sayed • SENSOR TECHNOLOGY")
                     .size(12.0)
@@ -1660,7 +1721,11 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
         if self.session_active() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+            ctx.request_repaint_after(Duration::from_millis(if self.remote_frame.is_some() {
+                33
+            } else {
+                100
+            }));
         }
         egui::TopBottomPanel::bottom("status-bar")
             .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(12))
@@ -1805,6 +1870,8 @@ impl eframe::App for App {
                     Mode::FileTransfer => "Requested access: write transferred files to the selected receive folder. No screen or keyboard/mouse access.",
                     Mode::ScreenView => "Requested access: view this desktop and show the remote pointer. No keyboard or mouse control.",
                     Mode::RemoteControl => "Requested access: view this desktop and control keyboard/mouse through attended input injection.",
+                    Mode::ScreenViewClipboard => "Requested access: view this desktop and share text clipboard in both directions (up to 64 KiB). No keyboard/mouse control. Clipboard can be disabled during the session.",
+                    Mode::RemoteControlClipboard => "Requested access: view/control this desktop AND share text clipboard in both directions (up to 64 KiB). Clipboard can be disabled during the session.",
                 });
                 if matches!(prompt.mode, Mode::FileTransfer) { ui.label(format!("Receive folder: {}", self.receive.display())); }
                 ui.label(format!("Request expires in {} seconds", 120_u64.saturating_sub(prompt.opened.elapsed().as_secs())));

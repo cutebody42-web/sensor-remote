@@ -27,6 +27,13 @@ pub enum CodecError {
     Timeout,
     #[error("invalid or oversized codec output")]
     Invalid,
+    #[error("codec output dimensions {actual_width}x{actual_height} do not match {expected_width}x{expected_height}")]
+    OutputDimensions {
+        expected_width: u32,
+        expected_height: u32,
+        actual_width: u32,
+        actual_height: u32,
+    },
 }
 
 struct Runtime {
@@ -324,6 +331,9 @@ impl Drop for Engine {
             let _ = self
                 .transform
                 .ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
+            if let Ok(shutdown) = self.transform.cast::<IMFShutdown>() {
+                let _ = shutdown.Shutdown();
+            }
         }
     }
 }
@@ -445,7 +455,38 @@ impl H264Encoder {
     pub fn available(&mut self) -> Result<Vec<EncodedFrame>, CodecError> {
         let mut result = Vec::new();
         for _ in 0..16 {
-            let Some(sample) = self.engine.output(MAX_ENCODED_FRAME)? else {
+            let sample = match self.engine.output(MAX_ENCODED_FRAME) {
+                Ok(value) => value,
+                Err(CodecError::Windows(error)) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                    let mut selected = None;
+                    for index in 0..32 {
+                        // Some hardware encoders announce their final SPS/PPS
+                        // media type only after consuming the first input.
+                        unsafe {
+                            let media = match self.engine.transform.GetOutputAvailableType(0, index)
+                            {
+                                Ok(media) => media,
+                                Err(_) => break,
+                            };
+                            if media.GetGUID(&MF_MT_SUBTYPE)? != MFVideoFormat_H264 {
+                                continue;
+                            }
+                            let size = media.GetUINT64(&MF_MT_FRAME_SIZE)?;
+                            if (size >> 32) as u32 != self.width || size as u32 != self.height {
+                                continue;
+                            }
+                            if self.engine.transform.SetOutputType(0, &media, 0).is_ok() {
+                                selected = Some(());
+                                break;
+                            }
+                        }
+                    }
+                    selected.ok_or(CodecError::Invalid)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let Some(sample) = sample else {
                 break;
             };
             let bytes = sample_bytes(&sample, MAX_ENCODED_FRAME)?;
@@ -555,7 +596,12 @@ impl H264Decoder {
                             if media.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_NV12 {
                                 let size = media.GetUINT64(&MF_MT_FRAME_SIZE)?;
                                 if (size >> 32) as u32 != self.width || size as u32 != self.height {
-                                    return Err(CodecError::Invalid);
+                                    return Err(CodecError::OutputDimensions {
+                                        expected_width: self.width,
+                                        expected_height: self.height,
+                                        actual_width: (size >> 32) as u32,
+                                        actual_height: size as u32,
+                                    });
                                 }
                                 selected = Some(media);
                                 break;
@@ -579,7 +625,12 @@ impl H264Decoder {
             let media = unsafe { self.engine.transform.GetOutputCurrentType(0)? };
             let size = unsafe { media.GetUINT64(&MF_MT_FRAME_SIZE)? };
             if (size >> 32) as u32 != self.width || size as u32 != self.height {
-                return Err(CodecError::Invalid);
+                return Err(CodecError::OutputDimensions {
+                    expected_width: self.width,
+                    expected_height: self.height,
+                    actual_width: (size >> 32) as u32,
+                    actual_height: size as u32,
+                });
             }
             let stride =
                 unsafe { media.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(self.width) as usize;

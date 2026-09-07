@@ -7,6 +7,14 @@ pub const MAX_HEIGHT: u32 = 4096;
 pub const MAX_PIXELS: usize = 4096 * 2160;
 pub const MAX_ENCODED_FRAME: usize = 8 * 1024 * 1024;
 pub const VIDEO_FRAGMENT: usize = 128 * 1024;
+pub const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
+
+pub fn validate_clipboard(text: &str) -> Result<(), MediaError> {
+    if text.len() > MAX_CLIPBOARD_BYTES || text.contains('\0') {
+        return Err(MediaError::Input);
+    }
+    Ok(())
+}
 
 #[derive(Debug, Error)]
 pub enum MediaError {
@@ -138,6 +146,8 @@ pub enum DesktopMessage {
     Pong(u64),
     Close,
     Error(String),
+    // Appended variants preserve existing postcard discriminants.
+    ClipboardText(String),
 }
 
 #[derive(Clone, Debug)]
@@ -362,6 +372,15 @@ impl Assembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clipboard_is_utf8_bounded_and_rejects_embedded_nul() {
+        assert!(validate_clipboard("").is_ok());
+        assert!(validate_clipboard("Hello\nمرحبا\n日本語").is_ok());
+        assert!(validate_clipboard(&"x".repeat(MAX_CLIPBOARD_BYTES)).is_ok());
+        assert!(validate_clipboard(&"x".repeat(MAX_CLIPBOARD_BYTES + 1)).is_err());
+        assert!(validate_clipboard(&"é".repeat(MAX_CLIPBOARD_BYTES)).is_err());
+        assert!(validate_clipboard("hello\0world").is_err());
+    }
     #[test]
     fn bt601_black_white_and_red_round_trip() {
         for color in [[0, 0, 0, 255], [255, 255, 255, 255], [0, 0, 255, 255]] {

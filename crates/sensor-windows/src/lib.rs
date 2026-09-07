@@ -4,6 +4,8 @@ mod dpapi;
 #[cfg(windows)]
 pub use dpapi::UserDpapi;
 #[cfg(windows)]
+pub mod clipboard;
+#[cfg(windows)]
 pub mod codec;
 #[cfg(windows)]
 pub mod desktop;

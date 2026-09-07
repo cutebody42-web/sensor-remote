@@ -55,6 +55,7 @@ struct PeerOffer {
     initiator_device_id: String,
     initiator_public_key: String,
     websocket: ServerWebSocket,
+    guard: ConnectionGuard,
 }
 
 struct Registration {
@@ -118,12 +119,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let state = state.clone();
-                thread::Builder::new()
+                let guard = ConnectionGuard(state.clone());
+                if let Err(error) = thread::Builder::new()
                     .name("sensor-rendezvous-client".into())
                     .spawn(move || {
-                        let _guard = ConnectionGuard(state.clone());
-                        handle_connection(stream, state);
-                    })?;
+                        handle_connection(stream, state, guard);
+                    })
+                {
+                    eprintln!("client worker unavailable: {error}");
+                }
             }
             Err(error) => eprintln!("accept failed: {error}"),
         }
@@ -131,7 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_connection(mut stream: TcpStream, state: Arc<State>) {
+fn handle_connection(mut stream: TcpStream, state: Arc<State>, guard: ConnectionGuard) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -143,7 +147,10 @@ fn handle_connection(mut stream: TcpStream, state: Arc<State>) {
         }
     };
     if path == "/health" || path == "/" {
-        let _ = consume_headers(&mut stream);
+        if consume_headers(&mut stream).is_err() {
+            let _ = http_response(&mut stream, 400, json!({"error": "invalid headers"}));
+            return;
+        }
         let _ = http_response(&mut stream, 200, health(&state));
         return;
     }
@@ -151,15 +158,17 @@ fn handle_connection(mut stream: TcpStream, state: Arc<State>) {
         .strip_prefix("/api/v1/lookup/")
         .or_else(|| path.strip_prefix("/devices/"))
     {
-        let _ = consume_headers(&mut stream);
-        let body = lookup(&state, device_id);
-        let status = if body["online"] == true { 200 } else { 404 };
+        if consume_headers(&mut stream).is_err() {
+            let _ = http_response(&mut stream, 400, json!({"error": "invalid headers"}));
+            return;
+        }
+        let (status, body) = lookup(&state, device_id);
         let _ = http_response(&mut stream, status, body);
         return;
     }
     if path == "/ws" || path == "/relay" {
         match accept_with_config(stream, Some(websocket_config(MAX_CONTROL_BYTES))) {
-            Ok(websocket) => handle_websocket(websocket, state),
+            Ok(websocket) => handle_websocket(websocket, state, guard),
             Err(error) => eprintln!("WebSocket handshake failed: {error}"),
         }
         return;
@@ -168,7 +177,7 @@ fn handle_connection(mut stream: TcpStream, state: Arc<State>) {
     let _ = http_response(&mut stream, 404, json!({"error": "not found"}));
 }
 
-fn handle_websocket(mut websocket: ServerWebSocket, state: Arc<State>) {
+fn handle_websocket(mut websocket: ServerWebSocket, state: Arc<State>, guard: ConnectionGuard) {
     let _ = websocket
         .get_mut()
         .set_read_timeout(Some(Duration::from_secs(10)));
@@ -185,7 +194,7 @@ fn handle_websocket(mut websocket: ServerWebSocket, state: Arc<State>) {
     let device_id = registration.device_id.clone();
     let _ = websocket.get_mut().set_read_timeout(Some(SOCKET_POLL));
     let connection_id = registration.connection_id;
-    let result = endpoint_loop(websocket, state.clone(), registration);
+    let result = endpoint_loop(websocket, state.clone(), registration, guard);
     remove_device(&state, &device_id, connection_id);
     if let Err(error) = result {
         eprintln!("device {device_id} disconnected: {error}");
@@ -250,14 +259,16 @@ fn register(websocket: &mut ServerWebSocket, state: &Arc<State>) -> Result<Regis
             },
         );
     }
-    send_control(
+    if let Err(error) = send_control(
         websocket,
         &ControlMessage::Registered {
             token,
             expires_seconds: TOKEN_TTL_SECONDS,
         },
-    )
-    .map_err(|error| error.to_string())?;
+    ) {
+        remove_device(state, &canonical_id, connection_id);
+        return Err(error);
+    }
     Ok(Registration {
         device_id: canonical_id,
         public_key: public_key_bytes,
@@ -274,6 +285,7 @@ fn endpoint_loop(
     mut websocket: ServerWebSocket,
     state: Arc<State>,
     registration: Registration,
+    guard: ConnectionGuard,
 ) -> Result<(), String> {
     let Registration {
         device_id,
@@ -377,6 +389,7 @@ fn endpoint_loop(
                             initiator_device_id: device_id.clone(),
                             initiator_public_key: encode_hex(&public_key),
                             websocket,
+                            guard,
                         };
                         if target.commands.try_send(offer).is_err() {
                             return Err("target disconnected before pairing".into());
@@ -414,7 +427,7 @@ fn endpoint_loop(
             Ok(Message::Ping(payload)) => websocket
                 .send(Message::Pong(payload))
                 .map_err(|error| error.to_string())?,
-            Ok(Message::Pong(_)) => touch_device(&state, &device_id, connection_id),
+            Ok(Message::Pong(_)) => {} // Only authenticated heartbeat tokens renew presence.
             Ok(Message::Close(_)) => return Ok(()),
             Ok(Message::Binary(_)) | Ok(Message::Frame(_)) => {
                 return Err("binary data arrived before pairing".into())
@@ -438,6 +451,7 @@ fn relay_pair(
     target_device_id: &str,
     target_public_key: &str,
 ) -> Result<(), String> {
+    let _initiator_guard = offer.guard;
     let mut initiator_websocket = offer.websocket;
     send_control(
         &mut target_websocket,
@@ -632,6 +646,7 @@ fn health(state: &Arc<State>) -> serde_json::Value {
     json!({
         "status": "ok",
         "server": "sensor",
+        "version": env!("CARGO_PKG_VERSION"),
         "mode": "RENDER_TEST",
         "database": "in_memory_presence",
         "connected_devices": connected_devices,
@@ -684,19 +699,25 @@ impl RateLimiter {
     }
 }
 
-fn lookup(state: &Arc<State>, device_id: &str) -> serde_json::Value {
+fn lookup(state: &Arc<State>, device_id: &str) -> (u16, serde_json::Value) {
     expire_devices(state);
-    let device_id = canonical_id(device_id).unwrap_or_default();
+    let device_id = match canonical_id(device_id) {
+        Ok(id) => id,
+        Err(_) => return (400, json!({"error": "invalid device ID"})),
+    };
     let online = state
         .devices
         .lock()
         .map(|devices| devices.get(&device_id).is_some_and(|entry| !entry.busy))
         .unwrap_or(false);
-    json!({
-        "device_id": device_id,
-        "online": online,
-        "mode": "RENDER_TEST",
-    })
+    (
+        if online { 200 } else { 404 },
+        json!({
+            "device_id": device_id,
+            "online": online,
+            "mode": "RENDER_TEST",
+        }),
+    )
 }
 
 fn send_control(websocket: &mut ServerWebSocket, message: &ControlMessage) -> Result<(), String> {
@@ -763,12 +784,17 @@ fn peek_path(stream: &TcpStream) -> io::Result<String> {
         {
             let request = std::str::from_utf8(&buffer[..end + 4])
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid HTTP request"))?;
-            return request
-                .lines()
-                .next()
-                .and_then(|line| line.split_whitespace().nth(1))
-                .map(str::to_owned)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing HTTP path"));
+            let line = request.lines().next().unwrap_or_default();
+            let fields: Vec<_> = line.split_whitespace().collect();
+            return match fields.as_slice() {
+                ["GET", path, "HTTP/1.1" | "HTTP/1.0"] if path.starts_with('/') => {
+                    Ok((*path).to_owned())
+                }
+                _ => Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "expected HTTP GET request",
+                )),
+            };
         }
         if count == buffer.len() {
             return Err(io::Error::new(
@@ -808,7 +834,10 @@ fn consume_headers(stream: &mut TcpStream) -> io::Result<()> {
     loop {
         let count = stream.read(&mut chunk)?;
         if count == 0 {
-            return Ok(());
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "incomplete HTTP headers",
+            ));
         }
         buffer.extend_from_slice(&chunk[..count]);
         if buffer.windows(4).any(|window| window == b"\r\n\r\n") {

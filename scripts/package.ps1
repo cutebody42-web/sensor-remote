@@ -2,7 +2,7 @@ param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $repoPath = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 if (-not $OutputDirectory) {
-    $OutputDirectory = Join-Path (Split-Path -Parent $repoPath) 'SENSOR-Windows-0.3.0'
+    $OutputDirectory = Join-Path (Split-Path -Parent $repoPath) 'SENSOR-Windows-0.3.1'
 }
 $packagePath = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $packagePath) {
@@ -42,6 +42,20 @@ try {
     }
     # Generated packaging metadata, not handwritten application configuration.
     $inventory | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $packagePath 'DEPENDENCIES.json') -Encoding utf8
+    $sensorApp = $metadata.packages | Where-Object { $_.name -eq 'sensor-desktop' }
+    $sensorComponents = @($metadata.packages | Where-Object { $_.id -ne $sensorApp.id } | ForEach-Object {
+        $sensorComponent = [ordered]@{ type = 'library'; 'bom-ref' = $_.id; name = $_.name; version = $_.version }
+        if ($_.source) { $sensorComponent.purl = 'pkg:cargo/' + $_.name + '@' + $_.version }
+        if ($_.license) { $sensorComponent.licenses = @(@{ expression = $_.license }) }
+        $sensorComponent
+    })
+    $sensorSbom = [ordered]@{
+        bomFormat = 'CycloneDX'; specVersion = '1.6'; serialNumber = 'urn:uuid:' + [Guid]::NewGuid(); version = 1
+        metadata = @{ timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'); component = @{ type = 'application'; 'bom-ref' = $sensorApp.id; name = 'SENSOR Remote Access'; version = $sensorApp.version } }
+        components = $sensorComponents
+        dependencies = @($metadata.resolve.nodes | ForEach-Object { @{ ref = $_.id; dependsOn = @($_.deps.pkg | Sort-Object -Unique) } })
+    }
+    $sensorSbom | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $packagePath 'sbom.cdx.json') -Encoding utf8
     $revision = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE) { throw 'Cannot record source revision' }
     if ((& git status --porcelain)) {

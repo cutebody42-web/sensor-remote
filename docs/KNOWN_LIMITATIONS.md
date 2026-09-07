@@ -1,16 +1,18 @@
-# Known limitations — 0.3.0
+# Known limitations — 0.3.1
 
 This is a functioning native Windows attended remote-desktop development app,
 **not a complete AnyDesk-equivalent product and not production ready**.
 
 - Screen capture, H.264 remote video, attended mouse/keyboard/text injection,
   monitor enumeration and selection are implemented for the ordinary unlocked
-  interactive desktop. They have not yet completed an unlocked two-device or
-  long-running verification run. H.265/AV1, UAC, secure desktop, login-screen
+  interactive desktop. The real capture/encode/decode/input path passed over
+  public WSS with both endpoints on this laptop. Cross-computer interactive
+  desktop and long-running certification remain. H.265/AV1, UAC, secure desktop, login-screen
   support and Ctrl+Alt+Del are not implemented.
 - No installed unattended access, Windows service, tray/background persistence,
-  password/MFA login, reconnect after reboot, audio, remote clipboard,
-  recording or privacy mode. A visible receiver can explicitly auto-accept one
+  password/MFA login, reconnect after reboot, audio, image/file clipboard,
+  recording or privacy mode. Text clipboard is explicitly permission-gated
+  and bounded; initial clipboard contents are not sent. A visible direct-TCP receiver can explicitly auto-accept one
   already pinned peer while the GUI remains open.
 - No virtual printer, physical printing pipeline, Auto Print, VPN, tunnels,
   Wake-on-LAN, discovery or whiteboard.
@@ -44,9 +46,11 @@ This is a functioning native Windows attended remote-desktop development app,
   security. A compromised endpoint/current-user account is outside protection.
 - No production security review, extended fuzz campaign, network impairment
   matrix, Windows 10/11/Server certification or 8+ hour stability evidence.
-- No publisher signature, MSI/installer, update mechanism or deployment server.
+- No publisher signature, MSI, automatic update mechanism or update server.
+  An unsigned NSIS per-user installer is provided; it is not a Windows service.
   No third-party policy or firewall rule was installed.
-- Current executable needs Direct3D 12 and VCRUNTIME140.dll (Visual C++ x64
-  runtime). Packaging records dependencies and collects available license files;
+- Current executable needs Direct3D 12 and Media Foundation. The Windows C
+  runtime is statically linked. Packaging records a CycloneDX SBOM,
+  dependencies and available license files;
   some registry crates omit license text, which the inventory flags with zero
   collected files. Distribution/license review is not complete.

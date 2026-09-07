@@ -11,6 +11,23 @@ struct Network {
     server: String,
 }
 
+/// Resolve only the selected source. A valid environment/profile override must
+/// not be defeated by a malformed lower-priority package configuration.
+pub fn resolve_network(
+    environment: Option<String>,
+    profile: &Path,
+    package: &Path,
+) -> Result<Option<String>, String> {
+    if let Some(server) = environment {
+        sensor_render::websocket_url(&server).map_err(|e| e.to_string())?;
+        return Ok(Some(server));
+    }
+    if let Some(server) = load_network(profile)? {
+        return Ok(Some(server));
+    }
+    load_network(package)
+}
+
 pub fn load_network(path: &Path) -> Result<Option<String>, String> {
     let file = match File::open(path) {
         Ok(file) => file,
@@ -60,11 +77,41 @@ impl Contact {
         {
             return Err("Contact name must contain 1-128 bytes without control characters.".into());
         }
-        self.address
-            .parse::<std::net::SocketAddr>()
-            .map_err(|_| "Use an IP address and port.")?;
+        if !self.address.is_empty() {
+            self.address
+                .parse::<std::net::SocketAddr>()
+                .map_err(|_| "Use an IP address and port, or leave empty for Internet routing.")?;
+        }
         Ok(())
     }
+}
+
+pub fn known_peer(
+    id: &str,
+    key: &str,
+    contacts: &[Contact],
+) -> Result<sensor_session::ExpectedPeer, String> {
+    let parsed = super::peer(
+        id,
+        if key.trim().is_empty() {
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        } else {
+            key
+        },
+    )?;
+    if let Some(contact) = contacts.iter().find(|contact| {
+        super::peer(&contact.id, &contact.key)
+            .is_ok_and(|known| known.device_id == parsed.device_id)
+    }) {
+        let known = super::peer(&contact.id, &contact.key)?;
+        if parsed.public_key != [0; 32] && parsed.public_key != known.public_key {
+            return Err(
+                "This device's key differs from its saved identity. Connection blocked.".into(),
+            );
+        }
+        return Ok(known);
+    }
+    Ok(parsed)
 }
 
 pub fn load(path: &Path) -> Result<Vec<Contact>, String> {
@@ -113,6 +160,47 @@ pub fn save(path: &Path, contacts: &[Contact]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn id_only_connections_use_saved_key_and_refuse_replacement() {
+        let contact = Contact {
+            name: "Known".into(),
+            id: "123456789".into(),
+            key: "ab".repeat(32),
+            address: String::new(),
+        };
+        assert!(contact.validate().is_ok());
+        let contacts = vec![contact];
+        assert_eq!(
+            known_peer("123 456 789", "", &contacts).unwrap().public_key,
+            [0xab; 32]
+        );
+        assert!(known_peer("123456789", &"cd".repeat(32), &contacts).is_err());
+        assert_eq!(
+            known_peer("987654321", "", &contacts).unwrap().public_key,
+            [0; 32]
+        );
+        assert!(known_peer("invalid", "", &contacts).is_err());
+    }
+    #[test]
+    fn network_precedence_is_lazy_and_invalid_selected_source_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let profile = root.path().join("profile.json");
+        let package = root.path().join("package.json");
+        std::fs::write(&package, b"corrupt").unwrap();
+        let server = "https://relay.example.com";
+        assert_eq!(
+            resolve_network(Some(server.into()), &profile, &package).unwrap(),
+            Some(server.into())
+        );
+        save_network(&profile, server).unwrap();
+        assert_eq!(
+            resolve_network(None, &profile, &package).unwrap(),
+            Some(server.into())
+        );
+        assert!(resolve_network(Some("http://example.com".into()), &profile, &package).is_err());
+        std::fs::write(&profile, b"corrupt").unwrap();
+        assert!(resolve_network(None, &profile, &package).is_err());
+    }
     #[test]
     fn contacts_round_trip_and_corruption_never_resets_silently() {
         let dir = tempfile::tempdir().unwrap();

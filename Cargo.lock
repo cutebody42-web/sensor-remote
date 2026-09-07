@@ -3003,7 +3003,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sensor-audit"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "fs2",
  "sensor-core",
@@ -3017,17 +3017,19 @@ dependencies = [
 
 [[package]]
 name = "sensor-client"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "sensor-audit",
  "sensor-core",
  "sensor-files",
  "sensor-identity",
  "sensor-media",
+ "sensor-render",
  "sensor-session",
  "sensor-transport",
  "sensor-windows",
  "serde",
+ "serde_json",
  "sha2",
  "tempfile",
  "thiserror 2.0.20",
@@ -3035,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "postcard",
  "rand_core 0.6.4",
@@ -3045,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-crypto"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -3059,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-desktop"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "eframe",
  "fs2",
@@ -3086,7 +3088,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-files"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "cap-std",
  "fs2",
@@ -3101,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-identity"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "fs2",
  "postcard",
@@ -3116,7 +3118,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-media"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -3124,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-protocol"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "postcard",
  "sensor-core",
@@ -3135,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-relay"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rand_core 0.6.4",
  "sensor-crypto",
@@ -3147,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-render"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rand_core 0.6.4",
  "rustls",
@@ -3164,7 +3166,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-rendezvous"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rand_core 0.6.4",
  "sensor-audit",
@@ -3186,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-session"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rand_core 0.6.4",
  "sensor-core",
@@ -3198,7 +3200,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-transport"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "sensor-core",
  "sensor-crypto",
@@ -3211,11 +3213,13 @@ dependencies = [
 
 [[package]]
 name = "sensor-windows"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
+ "arboard",
  "sensor-identity",
  "sensor-media",
  "sensor-session",
+ "sha2",
  "tempfile",
  "thiserror 2.0.20",
  "windows 0.61.3",

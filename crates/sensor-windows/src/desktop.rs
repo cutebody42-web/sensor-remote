@@ -3,7 +3,7 @@ use sensor_media::{pixels, BgraFrame, Display};
 use sensor_session::permissions::{Consent, Permission};
 use thiserror::Error;
 use windows::{
-    core::Interface,
+    core::{Interface, PWSTR},
     Win32::{
         Foundation::{HANDLE, HMODULE},
         Graphics::{
@@ -11,7 +11,7 @@ use windows::{
             Direct3D11::*,
             Dxgi::{Common::*, *},
         },
-        System::StationsAndDesktops::*,
+        System::{RemoteDesktop::*, StationsAndDesktops::*},
         UI::WindowsAndMessaging::*,
     },
 };
@@ -35,6 +35,30 @@ pub enum DesktopError {
 /// Opening READOBJECTS never switches, unlocks or attaches to another desktop.
 pub fn interactive_desktop() -> Result<(), DesktopError> {
     unsafe {
+        // The Default desktop can remain accessible behind LockApp. Check the
+        // current Windows session too, without switching desktops or unlocking.
+        let mut buffer = PWSTR::null();
+        let mut bytes = 0;
+        WTSQuerySessionInformationW(
+            None,
+            WTS_CURRENT_SESSION,
+            WTSSessionInfoEx,
+            &mut buffer,
+            &mut bytes,
+        )
+        .map_err(|_| DesktopError::Locked)?;
+        let unlocked = if !buffer.is_null() && bytes as usize >= std::mem::size_of::<WTSINFOEXW>() {
+            let info = std::ptr::read_unaligned(buffer.0.cast::<WTSINFOEXW>());
+            info.Level == 1
+                && info.Data.WTSInfoExLevel1.SessionState == WTSActive
+                && info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_UNLOCK as i32
+        } else {
+            false
+        };
+        WTSFreeMemory(buffer.0.cast());
+        if !unlocked {
+            return Err(DesktopError::Locked);
+        }
         let desktop = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS)
             .map_err(|_| DesktopError::Locked)?;
         let mut name = [0_u16; 128];

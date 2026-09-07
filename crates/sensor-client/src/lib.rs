@@ -28,6 +28,8 @@ pub enum Mode {
     FileTransfer,
     ScreenView,
     RemoteControl,
+    ScreenViewClipboard,
+    RemoteControlClipboard,
 }
 impl Mode {
     pub fn permissions(self) -> Permissions {
@@ -42,7 +44,30 @@ impl Mode {
                 Permission::RemotePointer,
                 Permission::Input,
             ]),
+            Self::ScreenViewClipboard => Permissions::of(&[
+                Permission::ViewDesktop,
+                Permission::RemotePointer,
+                Permission::ClipboardText,
+            ]),
+            Self::RemoteControlClipboard => Permissions::of(&[
+                Permission::ViewDesktop,
+                Permission::RemotePointer,
+                Permission::Input,
+                Permission::ClipboardText,
+            ]),
         }
+    }
+    pub fn is_desktop(self) -> bool {
+        matches!(
+            self,
+            Self::ScreenView
+                | Self::RemoteControl
+                | Self::ScreenViewClipboard
+                | Self::RemoteControlClipboard
+        )
+    }
+    pub fn controls_input(self) -> bool {
+        matches!(self, Self::RemoteControl | Self::RemoteControlClipboard)
     }
 }
 
@@ -174,7 +199,7 @@ pub fn serve(
         0,
     )?;
     connection.send(&Message::Accepted(consent.granted()))?;
-    let result = if matches!(mode, Mode::ScreenView | Mode::RemoteControl) {
+    let result = if mode.is_desktop() {
         interaction.desktop(&mut connection, &consent)
     } else {
         operate(&mut connection, &consent, local, receiver, log, interaction)
