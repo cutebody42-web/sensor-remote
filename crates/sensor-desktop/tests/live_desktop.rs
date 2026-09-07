@@ -284,7 +284,28 @@ fn real_desktop(input_test: bool) {
     sender.control.set_clipboard_enabled(true);
     assert!(!sender.control.clipboard_enabled());
     let stop_at = Instant::now();
-    sender.control.stop();
+    assert!(sender
+        .control
+        .send_remote(sensor_media::DesktopMessage::Close));
+    for job in [&sender, &receiver] {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "graceful close was not acknowledged"
+            );
+            match job.events.recv_timeout(Duration::from_millis(20)) {
+                Ok(Event::Finished(result)) => {
+                    assert!(result.is_ok(), "graceful close failed: {result:?}");
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("worker disappeared without close result")
+                }
+                _ => {}
+            }
+        }
+    }
     stopped(&sender);
     stopped(&receiver);
     assert!(

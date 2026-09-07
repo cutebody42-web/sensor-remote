@@ -803,7 +803,14 @@ fn spawn_host_reader(
                 }
                 Message::Desktop(DesktopMessage::Close) | Message::Close => {
                     let _ = injector.release();
-                    let _ = commands.send(HostCommand::Close);
+                    if commands.send(HostCommand::Close).is_ok() {
+                        // Dropping either secure half aborts the shared socket.
+                        // Keep the reader alive until the writer acknowledges
+                        // Close and the host's shutdown guard releases us.
+                        while !control.is_stopped() {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                    }
                     break;
                 }
                 _ => {

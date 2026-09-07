@@ -57,6 +57,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let identity =
         IdentityFileStore::new(config.join("identity.bin"), UserDpapi).load_or_create()?;
     let contacts = settings::load(&config.join("contacts.json"))?;
+    let unattended = sensor_desktop::unattended::load(
+        &config.join("unattended.bin"),
+        &UserDpapi,
+        &identity.keypair().public_key(),
+    )?;
     let receive = config.join("Received Files");
     std::fs::create_dir_all(&receive)?;
     let render_server = settings::resolve_network(
@@ -147,6 +152,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 alias,
                 contact_name: String::new(),
                 contacts,
+                unattended,
                 status: "Offline • No listener started".into(),
                 notice: None,
                 job: None,
@@ -220,6 +226,7 @@ struct App {
     alias: String,
     contact_name: String,
     contacts: Vec<Contact>,
+    unattended: Option<sensor_desktop::unattended::Grant>,
     status: String,
     notice: Option<String>,
     job: Option<Job>,
@@ -733,6 +740,16 @@ impl App {
                             self.page = Page::Remote;
                             self.remote_control = mode.controls_input();
                             self.remote_source_listener = source_listener;
+                        }
+                        if source_listener
+                            && self.unattended.as_ref().is_some_and(|grant| {
+                                sensor_desktop::updates::now()
+                                    .is_ok_and(|now| grant.permits(peer, mode, now))
+                            })
+                        {
+                            self.notice = Some(format!("Unattended signed-in-user session accepted for verified device {}. Stop/disconnect remains available. Clipboard and files are not included.",peer.device_id));
+                            let _ = reply.try_send(true);
+                            continue;
                         }
                         self.consent = Some(ConsentPrompt {
                             peer,
@@ -1638,6 +1655,8 @@ impl App {
             }
         });
         let mut selected = None;
+        let mut grant_to = None;
+        let mut revoke = false;
         card(ui, |ui| {
             if self.contacts.is_empty() {
                 ui.label(RichText::new("No saved contacts.").color(MUTED));
@@ -1653,9 +1672,60 @@ impl App {
                     {
                         selected = Some(index);
                     }
+                    if ui
+                        .add_enabled(
+                            !self.listener_busy && self.job.is_none(),
+                            egui::Button::new("Allow unattended view/control for 30 days"),
+                        )
+                        .clicked()
+                    {
+                        grant_to = Some(index);
+                    }
                 });
             }
+            ui.label("Unattended access is limited to a verified key and an unlocked, signed-in Windows desktop. It does not enable pre-login, UAC, clipboard or file access. Leave SENSOR running and online.");
+            if let Some(grant) = &self.unattended {
+                ui.label(format!(
+                    "Unattended authority: device {} • expires at Unix UTC {}",
+                    grant.device_id, grant.expires_unix
+                ));
+                if ui
+                    .button("Revoke unattended access and stop sessions")
+                    .clicked()
+                {
+                    revoke = true;
+                }
+            }
         });
+        if let Some(index) = grant_to {
+            let contact = &self.contacts[index];
+            let result = (|| {
+                let grant = sensor_desktop::unattended::Grant::new(
+                    peer(&contact.id, &contact.key)?,
+                    sensor_desktop::updates::now()?,
+                )?;
+                sensor_desktop::unattended::save(
+                    &self.config.join("unattended.bin"),
+                    Some(&grant),
+                    &UserDpapi,
+                    &self.identity.keypair().public_key(),
+                )?;
+                Ok::<_, String>(grant)
+            })();
+            match result {
+                Ok(grant) => {
+                    self.unattended = Some(grant);
+                    self.notice = Some("Unattended view/control authorized for this verified device for 30 days. Keep SENSOR open; this is not a boot-time service.".into());
+                }
+                Err(e) => self.notice = Some(e),
+            }
+        }
+        if revoke {
+            // Always stop active work immediately, even if persistence fails.
+            self.unattended = None;
+            self.stop();
+            self.notice = Some(match sensor_desktop::unattended::save(&self.config.join("unattended.bin"), None, &UserDpapi, &self.identity.keypair().public_key()) {Ok(())=>"Unattended authority revoked and current sessions stopped.".into(),Err(e)=>format!("Current authority disabled, but could not save revocation: {e}. Do not restart SENSOR until this is resolved.")});
+        }
         if let Some(index) = selected {
             let contact = &self.contacts[index];
             self.peer_id = contact.id.clone();
