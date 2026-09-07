@@ -50,16 +50,17 @@ mod fixture {
             let _ = self.0.wait();
         }
     }
-    fn host(root: &Path, peer: ExpectedPeer, target: &Path) -> Result<()> {
+    fn host(root: &Path, peer: ExpectedPeer, target: &Path, input: bool) -> Result<()> {
         // A headless/service/locked runner is an explicit failed prerequisite,
         // never a reason to bypass desktop security or synthesize fake capture.
         sensor_windows::desktop::interactive_desktop()?;
         let identity = identity(root)?;
-        let _target = Child(
-            std::process::Command::new(target)
-                .arg(root.join("qa-state.json"))
-                .spawn()?,
-        );
+        let mut command = std::process::Command::new(target);
+        command.arg(root.join("qa-state.json"));
+        if input {
+            command.env("SENSOR_QA_CLOUD_FOCUS", "1");
+        }
+        let _target = Child(command.spawn()?);
         let receive = root.join("receive");
         fs::create_dir_all(&receive)?;
         let job = worker::start(
@@ -80,7 +81,12 @@ mod fixture {
         while Instant::now() < until {
             match job.events.recv_timeout(Duration::from_secs(1)) {
                 Ok(Event::Consent(actual, mode, answer)) => {
-                    let allow = actual == peer && matches!(mode, sensor_client::Mode::ScreenView);
+                    let expected_mode = matches!(
+                        (input, mode),
+                        (true, sensor_client::Mode::RemoteControl)
+                            | (false, sensor_client::Mode::ScreenView)
+                    );
+                    let allow = actual == peer && expected_mode;
                     answer.send(allow)?;
                     accepted = allow;
                 }
@@ -91,7 +97,18 @@ mod fixture {
                     if !accepted || captured < 5 || encoded < 5 {
                         return Err("insufficient real captured/encoded frames".into());
                     }
-                    println!("CROSS_DESKTOP_HOST_PASS platform=windows captured={captured} encoded={encoded} explicit_view_only=true");
+                    if input {
+                        let state: serde_json::Value =
+                            serde_json::from_slice(&fs::read(root.join("qa-state.json"))?)?;
+                        if state["typed_expected"] != true
+                            || state["wheel"] != true
+                            || state["clicks"].as_u64().unwrap_or(0) == 0
+                        {
+                            return Err("Cloud QA did not verify actual Unicode keyboard, mouse click and wheel".into());
+                        }
+                        println!("CROSS_COMPUTER_INPUT_PASS native_unicode=true mouse_click=true wheel=true");
+                    }
+                    println!("CROSS_DESKTOP_HOST_PASS platform=windows captured={captured} encoded={encoded} explicit_view_only={}", !input);
                     return Ok(());
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -102,7 +119,7 @@ mod fixture {
         }
         Err("bounded desktop host deadline exceeded".into())
     }
-    fn view(root: &Path, public: &Path) -> Result<()> {
+    fn view(root: &Path, public: &Path, qa: Option<&Path>) -> Result<()> {
         let bytes = fs::read(public)?;
         if bytes.len() > 4096 {
             return Err("public metadata too large".into());
@@ -118,7 +135,7 @@ mod fixture {
                 route: Route::Render(RenderRoute {
                     server: SERVER.into(),
                 }),
-                control: false,
+                control: qa.is_some(),
                 clipboard: false,
             },
             identity,
@@ -131,11 +148,14 @@ mod fixture {
         let mut changed = false;
         let mut first_frame = None;
         let mut format_seen = false;
+        let mut format_value = None;
+        let mut input_sent = false;
         while Instant::now() < until {
             while let Ok(event) = job.events.try_recv() {
                 match event {
                     Event::RemoteFormat(format) => {
                         format.validate()?;
+                        format_value = Some(format.clone());
                         format_seen = true;
                         println!(
                             "CLOUD_NATIVE_FORMAT width={} height={} hardware={} encoder={}",
@@ -158,7 +178,60 @@ mod fixture {
                 first_pixels.get_or_insert(digest);
             }
             let (frames, bytes, rtt) = job.control.statistics();
+            if let (Some(qa), Some(format)) = (qa, &format_value) {
+                if !input_sent && frames > 4 {
+                    let state_bytes = fs::read(qa)?;
+                    if state_bytes.len() > 4096 {
+                        return Err("Oversized QA fixture state".into());
+                    }
+                    let state: serde_json::Value = serde_json::from_slice(&state_bytes)?;
+                    if state["focused"] != true || state["text_focused"] != true {
+                        return Err("Cloud synthetic target has not confirmed text focus".into());
+                    }
+                    let x = state["text_center"][0].as_f64().ok_or("Missing QA x")? as i32
+                        - format.display.left;
+                    let y = state["text_center"][1].as_f64().ok_or("Missing QA y")? as i32
+                        - format.display.top;
+                    if x < 0 || y < 0 {
+                        return Err("QA target outside captured monitor".into());
+                    }
+                    use sensor_media::{DesktopMessage, Input, MouseButton};
+                    for event in [
+                        Input::Move {
+                            x: x as u32,
+                            y: y as u32,
+                        },
+                        Input::Button {
+                            button: MouseButton::Left,
+                            down: true,
+                        },
+                        Input::Button {
+                            button: MouseButton::Left,
+                            down: false,
+                        },
+                        Input::Text("SENSOR QA مرحبا 123".into()),
+                        Input::Wheel {
+                            delta: -120,
+                            horizontal: false,
+                        },
+                        Input::ReleaseAll,
+                    ] {
+                        event.validate(&format.display)?;
+                        if !job.control.send_remote(DesktopMessage::Input {
+                            generation: format.generation,
+                            event,
+                        }) {
+                            return Err("Input queue unavailable".into());
+                        }
+                    }
+                    input_sent = true;
+                    println!("CROSS_COMPUTER_INPUT_SENT only_synthetic_fixture=true");
+                }
+            }
             if frames >= 5 && changed && rtt > 0 && started.elapsed() > Duration::from_secs(30) {
+                if qa.is_some() && !input_sent {
+                    return Err("Input not sent".into());
+                }
                 if !job.control.send_remote(sensor_media::DesktopMessage::Close) {
                     return Err("cannot send graceful desktop close".into());
                 }
@@ -180,8 +253,9 @@ mod fixture {
         let args: Vec<_> = std::env::args().skip(1).collect();
         match args.as_slice() {
             [mode, root, public] if mode == "prepare" => prepare(Path::new(root), Path::new(public)),
-            [mode, root, public] if mode == "view" => view(Path::new(root), Path::new(public)),
-            [mode, root, id, key, target] if mode == "host" => host(Path::new(root), sensor_desktop::peer(id, key)?, Path::new(target)),
+            [mode, root, public] if mode == "view" => view(Path::new(root), Path::new(public), None),
+            [mode, root, public, qa] if mode == "view-control" => view(Path::new(root), Path::new(public), Some(Path::new(qa))),
+            [mode, root, id, key, target] if mode == "host" || mode == "host-control" => host(Path::new(root), sensor_desktop::peer(id, key)?, Path::new(target), mode == "host-control"),
             _ => Err("Usage: cross_desktop prepare <profile> <public-json> | view <profile> <host-json> | host <profile> <viewer-id> <viewer-key> <qa-target-exe>".into()),
         }
     }

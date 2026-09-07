@@ -1,5 +1,6 @@
 //! Native desktop's testable worker boundary; no browser, HTML, or web server.
 pub mod settings;
+pub mod updates;
 pub mod worker;
 
 pub fn hex(bytes: &[u8]) -> String {

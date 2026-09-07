@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 sensor-client = { path = "../sensor-client" }
 sensor-core = { path = "../sensor-core" }
+sensor-crypto = { path = "../sensor-crypto" }
 sensor-identity = { path = "../sensor-identity" }
 sensor-windows = { path = "../sensor-windows" }
 sensor-session = { path = "../sensor-session" }
@@ -26,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
+sha2.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }

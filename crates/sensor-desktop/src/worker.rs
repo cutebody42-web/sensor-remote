@@ -856,8 +856,9 @@ fn host_desktop(
     );
 
     let setup = |index: u32, generation: u64| {
-        let capture = desktop::Capture::new(index, consent)
-            .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
+        let capture = desktop::Capture::new(index, consent).map_err(|error| {
+            sensor_client::EndpointError::Desktop(format!("Capture monitor {index}: {error}"))
+        })?;
         let raw_width = if capture.rotation == 90 || capture.rotation == 270 {
             capture.display.height
         } else {
@@ -908,7 +909,9 @@ fn host_desktop(
         Ok::<_, sensor_client::EndpointError>((capture, encoder, format))
     };
 
-    let (mut capture, mut encoder, mut format) = setup(selected, generation)?;
+    let (initial_capture, initial_encoder, mut format) = setup(selected, generation)?;
+    let mut capture = Some(initial_capture);
+    let mut encoder = Some(initial_encoder);
     desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
     let mut last_frame = Instant::now() - Duration::from_millis(34);
     let mut last_cursor_at = Instant::now() - Duration::from_millis(101);
@@ -923,6 +926,10 @@ fn host_desktop(
         // Hardware MFT output arrives asynchronously. Poll even on a static
         // desktop, otherwise the first frame can remain buffered indefinitely.
         let pending = encoder
+            .as_mut()
+            .ok_or_else(|| {
+                sensor_client::EndpointError::Desktop("Encoder is not configured.".into())
+            })?
             .available()
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
         send_video_packets(&mut writer, pending, generation, control)?;
@@ -938,10 +945,14 @@ fn host_desktop(
                         ));
                     }
                     let next_generation = generation.saturating_add(1);
+                    // DXGI refuses a second duplication of the same output in
+                    // one process. Release the old capture before reopening it.
+                    drop(capture.take());
+                    drop(encoder.take());
                     let (next_capture, next_encoder, next_format) = setup(index, next_generation)?;
                     generation = next_generation;
-                    capture = next_capture;
-                    encoder = next_encoder;
+                    capture = Some(next_capture);
+                    encoder = Some(next_encoder);
                     format = next_format;
                     desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
                     let mut current = active.lock().map_err(|_| {
@@ -951,7 +962,7 @@ fn host_desktop(
                     })?;
                     *current = InputTarget {
                         generation,
-                        display: capture.display.clone(),
+                        display: format.display.clone(),
                     };
                 }
                 HostCommand::Pong(value) => {
@@ -975,6 +986,12 @@ fn host_desktop(
             }
             clipboard_at = Instant::now();
         }
+        let capture = capture.as_mut().ok_or_else(|| {
+            sensor_client::EndpointError::Desktop("Capture is not configured.".into())
+        })?;
+        let encoder = encoder.as_mut().ok_or_else(|| {
+            sensor_client::EndpointError::Desktop("Encoder is not configured.".into())
+        })?;
         if last_frame.elapsed() >= Duration::from_secs_f64(1.0 / format.fps_limit as f64) {
             match capture
                 .next(consent)

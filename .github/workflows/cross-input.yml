@@ -1,0 +1,81 @@
+name: SENSOR two-computer native input gate
+on:
+  workflow_dispatch:
+    inputs:
+      viewer_id:
+        description: Temporary laptop viewer ID (public)
+        required: true
+        type: string
+      viewer_key:
+        description: Temporary laptop viewer public key
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  cloud-input:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - name: Build actual native fixtures
+        run: cargo build -p sensor-desktop --example cross_desktop --example qa_target --locked
+      - name: Start isolated cloud test target
+        shell: pwsh
+        env:
+          SENSOR_VIEWER_ID: ${{ inputs.viewer_id }}
+          SENSOR_VIEWER_KEY: ${{ inputs.viewer_key }}
+        run: |
+          if ($env:SENSOR_VIEWER_ID -notmatch '^[1-9][0-9]{8}$' -or $env:SENSOR_VIEWER_KEY -notmatch '^[0-9a-f]{64}$') { throw 'Invalid public identity' }
+          $profile = Join-Path $env:RUNNER_TEMP 'sensor-input-profile'
+          $public = Join-Path $env:RUNNER_TEMP 'sensor-input-public.json'
+          & '.\target\debug\examples\cross_desktop.exe' prepare $profile $public
+          if ($LASTEXITCODE) { throw 'Identity preparation failed' }
+          # Retain the explicit temporary fixture across workflow steps.
+          $env:RUNNER_TRACKING_ID = ''
+          $exe = Join-Path (Get-Location) 'target\debug\examples\cross_desktop.exe'
+          $qa = Join-Path (Get-Location) 'target\debug\examples\qa_target.exe'
+          $out = Join-Path $env:RUNNER_TEMP 'sensor-input.log'
+          $err = Join-Path $env:RUNNER_TEMP 'sensor-input-error.log'
+          $process = Start-Process -FilePath $exe -ArgumentList @('host-control', ('"'+$profile+'"'), $env:SENSOR_VIEWER_ID, $env:SENSOR_VIEWER_KEY, ('"'+$qa+'"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+          $process.Id | Set-Content (Join-Path $env:RUNNER_TEMP 'sensor-input.pid')
+          $until = [DateTime]::UtcNow.AddSeconds(45)
+          do {
+            if ($process.HasExited) { Get-Content $err; throw 'Cloud input host stopped' }
+            $state = $null
+            if (Test-Path (Join-Path $profile 'qa-state.json')) { $state = Get-Content (Join-Path $profile 'qa-state.json') -Raw | ConvertFrom-Json }
+            if ($state.focused -eq $true -and $state.text_focused -eq $true) { break }
+            Start-Sleep -Milliseconds 500
+          } while ([DateTime]::UtcNow -lt $until)
+          if (!$state.focused -or !$state.text_focused) { throw 'Synthetic cloud text field is not focused; input not permitted' }
+          Copy-Item (Join-Path $profile 'qa-state.json') (Join-Path $env:RUNNER_TEMP 'sensor-input-target.json')
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sensor-input-public
+          path: |
+            ${{ runner.temp }}/sensor-input-public.json
+            ${{ runner.temp }}/sensor-input-target.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Require actual cloud input acknowledgement
+        shell: pwsh
+        run: |
+          $id = [int](Get-Content (Join-Path $env:RUNNER_TEMP 'sensor-input.pid'))
+          Wait-Process -Id $id -Timeout 480 -ErrorAction SilentlyContinue
+          if (Get-Process -Id $id -ErrorAction SilentlyContinue) { throw 'Cloud input timeout' }
+          $out = Get-Content (Join-Path $env:RUNNER_TEMP 'sensor-input.log') -Raw
+          $err = Get-Content (Join-Path $env:RUNNER_TEMP 'sensor-input-error.log') -Raw
+          Write-Output $out
+          Write-Output $err
+          if ($err -or $out -notmatch 'CROSS_COMPUTER_INPUT_PASS' -or $out -notmatch 'CROSS_DESKTOP_HOST_PASS') { throw 'Two-computer native control has not passed' }
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sensor-input-evidence
+          path: ${{ runner.temp }}/sensor-input*.log
+          retention-days: 7

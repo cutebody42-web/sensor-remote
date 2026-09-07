@@ -3070,6 +3070,7 @@ dependencies = [
  "sensor-audit",
  "sensor-client",
  "sensor-core",
+ "sensor-crypto",
  "sensor-files",
  "sensor-identity",
  "sensor-media",

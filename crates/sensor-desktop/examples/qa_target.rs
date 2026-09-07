@@ -20,6 +20,12 @@ fn main() -> eframe::Result {
                 ui.painter().rect_filled(rect, 8.0, pulse);
                 ui.label("Remote test input:");
                 let response = ui.add(egui::TextEdit::singleline(&mut self.text).desired_width(360.0));
+                // Explicit cloud fixture only: focus its own editable surface.
+                // No OS security dialog or other application's input is touched.
+                if self.frames == 1 && std::env::var_os("SENSOR_QA_CLOUD_FOCUS").is_some() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    response.request_focus();
+                }
                 if response.clicked() { self.clicked += 1; }
                 self.wheel |= ctx.input(|i| i.raw_scroll_delta.y != 0.0);
                 let viewport = ctx.input(|i| i.viewport().clone());

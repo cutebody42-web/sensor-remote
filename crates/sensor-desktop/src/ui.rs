@@ -163,6 +163,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 progress: None,
                 started: None,
                 verified_audit: None,
+                update_check: None,
                 remote_frame: None,
                 remote_texture: None,
                 uploaded_frame: None,
@@ -235,6 +236,7 @@ struct App {
     progress: Option<(u64, u64)>,
     started: Option<Instant>,
     verified_audit: Option<String>,
+    update_check: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     remote_frame: Option<Arc<DecodedFrame>>,
     remote_texture: Option<egui::TextureHandle>,
     uploaded_frame: Option<Arc<DecodedFrame>>,
@@ -1734,9 +1736,50 @@ impl App {
             }
         });
         card(ui, |ui| {
+            ui.label(RichText::new("Publisher-signed updates").strong());
+            ui.label("Select a SENSOR release manifest and installer. The compiled publisher key, version, expiry, size and SHA-256 must all match before a verified copy is staged. Nothing is installed automatically.");
+            if ui
+                .add_enabled(
+                    self.update_check.is_none() && !self.listener_busy && self.job.is_none(),
+                    egui::Button::new("Verify and stage signed update…"),
+                )
+                .clicked()
+            {
+                if let Some(manifest) = rfd::FileDialog::new()
+                    .set_title("Select SENSOR signed release manifest")
+                    .add_filter("Signed manifest", &["json"])
+                    .pick_file()
+                {
+                    if let Some(installer) = rfd::FileDialog::new()
+                        .set_title("Select matching SENSOR installer")
+                        .add_filter("Windows installer", &["exe"])
+                        .pick_file()
+                    {
+                        let root = self.config.join("Verified Updates");
+                        let (send, receive) = std::sync::mpsc::channel();
+                        self.update_check = Some(receive);
+                        std::thread::spawn(move || {
+                            let result = (|| {
+                                let installed =
+                                    sensor_desktop::updates::version(env!("CARGO_PKG_VERSION"))?;
+                                let (path, release) = sensor_desktop::updates::stage(
+                                    &manifest, &installer, &root, installed,
+                                )?;
+                                Ok(format!("Verified publisher update {}.{}.{}. Close SENSOR, then run this staged installer: {}. Windows Authenticode status is separate.",release.version[0],release.version[1],release.version[2],path.display()))
+                            })();
+                            let _ = send.send(result);
+                        });
+                    }
+                }
+            }
+            if self.update_check.is_some() {
+                ui.label("Verifying publisher signature and installer bytes…");
+            }
+        });
+        card(ui, |ui| {
             ui.label(RichText::new("Release status: not production ready").strong());
             ui.label("Available here: persistent identity, attended Internet screen/control, permission-gated text clipboard, encrypted chat, integrity-checked file transfer with explicit reconnect/resume, local contacts, signed incoming-session audit, and a per-user installer.");
-            ui.label("Not implemented: unattended Windows service, UAC/login screen, H.265/AV1, audio, printing, Auto Print, VPN, signed installers/updates, durable accounts, NAT traversal, and direct/relay failover. Public routing uses temporary Railway trial infrastructure. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
+            ui.label("Not implemented: unattended Windows service, UAC/login screen, H.265/AV1, audio, printing, Auto Print, VPN, Authenticode signing, automatic update delivery, durable accounts, NAT traversal, and direct/relay failover. Public routing uses temporary Railway trial infrastructure. Attended DXGI/H.264 view/control requires an unlocked ordinary desktop.");
             ui.label(
                 RichText::new("Designed by ENG Mohamed Sayed • SENSOR TECHNOLOGY")
                     .size(12.0)
@@ -1749,6 +1792,23 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
+        if let Some(receiver) = &self.update_check {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.notice = Some(result.unwrap_or_else(|e| format!("Update rejected: {e}")));
+                    self.update_check = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.notice = Some(
+                        "Update verification worker stopped without a result; nothing installed."
+                            .into(),
+                    );
+                    self.update_check = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if self.session_active() {
             ctx.request_repaint_after(Duration::from_millis(if self.remote_frame.is_some() {
                 33
