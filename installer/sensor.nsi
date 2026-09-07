@@ -78,8 +78,8 @@ Section "SENSOR Remote" Main
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "Publisher" "SENSOR TECHNOLOGY"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "DisplayIcon" "$INSTDIR\SENSOR-Remote.exe,0"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "UninstallString" '$"$INSTDIR\Uninstall.exe$"'
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "QuietUninstallString" '$"$INSTDIR\Uninstall.exe$" /S'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "UninstallString" '"$INSTDIR\Uninstall.exe"'
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "QuietUninstallString" '"$INSTDIR\Uninstall.exe" /S'
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "NoModify" 1
   WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\SENSORRemote" "NoRepair" 1
   CreateDirectory "$SMPROGRAMS\SENSOR Remote"

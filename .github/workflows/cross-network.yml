@@ -1,6 +1,15 @@
 name: SENSOR cross-network Windows fixture
 on:
   workflow_dispatch:
+    inputs:
+      host_id:
+        description: Temporary laptop fixture device ID (public)
+        required: true
+        type: string
+      host_key:
+        description: Temporary laptop fixture public identity key
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
@@ -16,38 +25,20 @@ jobs:
           toolchain: 1.98.1
       - name: Build isolated synthetic endpoint
         run: cargo build -p sensor-client --example cross_network --locked
-      - name: Start bounded public-WSS test receiver
+      - name: Send and verify the synthetic file across networks
         shell: pwsh
+        env:
+          SENSOR_FIXTURE_ID: ${{ inputs.host_id }}
+          SENSOR_FIXTURE_KEY: ${{ inputs.host_key }}
         run: |
           $ErrorActionPreference = 'Stop'
           $public = Join-Path $env:RUNNER_TEMP 'sensor-cross-network-public.json'
           $out = Join-Path $env:RUNNER_TEMP 'sensor-cross-network.log'
-          $err = Join-Path $env:RUNNER_TEMP 'sensor-cross-network-errors.log'
-          $fixture = Start-Process -FilePath '.\target\debug\examples\cross_network.exe' -ArgumentList @('host','https://sensor-rendezvous-production.up.railway.app',$public) -WindowStyle Hidden -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
-          $fixture.Id | Set-Content (Join-Path $env:RUNNER_TEMP 'sensor-cross-network.pid')
-          $until = [DateTime]::UtcNow.AddSeconds(100)
-          while (!(Test-Path -LiteralPath $public) -and [DateTime]::UtcNow -lt $until) {
-            if ($fixture.HasExited) { Get-Content $err; throw 'Fixture stopped before registration' }
-            Start-Sleep -Milliseconds 500
-          }
-          if (!(Test-Path -LiteralPath $public)) { Stop-Process -Id $fixture.Id; throw 'Fixture registration timed out' }
-      - uses: actions/upload-artifact@v7
-        with:
-          name: sensor-cross-network-public
-          path: ${{ runner.temp }}/sensor-cross-network-public.json
-          retention-days: 1
-          if-no-files-found: error
-      - name: Wait for the laptop synthetic transfer
-        shell: pwsh
-        run: |
-          $out = Join-Path $env:RUNNER_TEMP 'sensor-cross-network.log'
-          $err = Join-Path $env:RUNNER_TEMP 'sensor-cross-network-errors.log'
-          $fixtureId = [int](Get-Content (Join-Path $env:RUNNER_TEMP 'sensor-cross-network.pid'))
-          $until = [DateTime]::UtcNow.AddMinutes(10)
-          while ((Get-Process -Id $fixtureId -ErrorAction SilentlyContinue) -and [DateTime]::UtcNow -lt $until) { Start-Sleep -Seconds 2 }
-          Get-Content $out
-          Get-Content $err
-          if ((Get-Content $out -Raw) -notmatch 'CROSS_NETWORK_HOST_PASS') { throw 'Remote transfer did not pass' }
+          if ($env:SENSOR_FIXTURE_ID -notmatch '^[1-9][0-9]{8}$' -or $env:SENSOR_FIXTURE_KEY -notmatch '^[0-9a-f]{64}$') { throw 'Invalid public fixture identity' }
+          @{server='https://sensor-rendezvous-production.up.railway.app';device_id=[uint32]$env:SENSOR_FIXTURE_ID;public_key=$env:SENSOR_FIXTURE_KEY} | ConvertTo-Json | Set-Content $public -Encoding utf8NoBOM
+          & '.\target\debug\examples\cross_network.exe' client $public 2>&1 | Tee-Object -FilePath $out
+          if ($LASTEXITCODE -ne 0) { throw "Remote fixture failed: $LASTEXITCODE" }
+          if ([string](Get-Content $out -Raw) -notmatch 'CROSS_NETWORK_CLIENT_PASS') { throw 'Missing positive transfer evidence' }
       - uses: actions/upload-artifact@v7
         if: always()
         with:

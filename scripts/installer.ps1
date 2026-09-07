@@ -35,7 +35,7 @@ foreach ($sensorDirectory in ($sensorDirectories | Sort-Object Length -Descendin
 # Mechanical manifest generation from exact packaged filenames.
 $sensorInstallLines | Set-Content -LiteralPath (Join-Path $sensorTemp 'payload-install.nsh') -Encoding utf8
 $sensorRemoveLines | Set-Content -LiteralPath (Join-Path $sensorTemp 'payload-uninstall.nsh') -Encoding utf8
-& $sensorCompiler /V2 ("/DPACKAGE=" + $sensorPackage) ("/DOUTPUT=" + $sensorOutput) (Join-Path $sensorTemp 'sensor.nsi')
+& $sensorCompiler /V2 /WX ("/DPACKAGE=" + $sensorPackage) ("/DOUTPUT=" + $sensorOutput) (Join-Path $sensorTemp 'sensor.nsi')
 if ($LASTEXITCODE) { throw 'NSIS compilation failed' }
 Get-FileHash -LiteralPath $sensorOutput -Algorithm SHA256
 Write-Output "Built unsigned per-user installer: $sensorOutput"
