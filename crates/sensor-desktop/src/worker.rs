@@ -648,6 +648,7 @@ fn execute(
 #[cfg(windows)]
 enum HostCommand {
     SelectDisplay(u32),
+    SelectVideoProfile(sensor_media::VideoProfile),
     Pong(u64),
     Close,
     Failed(String),
@@ -788,7 +789,17 @@ fn spawn_host_reader(
                         break;
                     }
                 }
-                Message::Desktop(DesktopMessage::SelectDisplay(index)) => {
+                Message::Desktop(
+                    message @ (DesktopMessage::SelectDisplay(_)
+                    | DesktopMessage::SelectVideoProfile(_)),
+                ) => {
+                    let index = match message {
+                        DesktopMessage::SelectDisplay(index) => index,
+                        _ => active
+                            .lock()
+                            .map(|target| target.display.index)
+                            .unwrap_or(u32::MAX),
+                    };
                     if !displays.iter().any(|display| display.index == index) {
                         let _ =
                             commands.send(HostCommand::Failed("Unknown monitor selected.".into()));
@@ -808,7 +819,13 @@ fn spawn_host_reader(
                         ));
                         break;
                     }
-                    if commands.send(HostCommand::SelectDisplay(index)).is_err() {
+                    let command = match message {
+                        DesktopMessage::SelectVideoProfile(profile) => {
+                            HostCommand::SelectVideoProfile(profile)
+                        }
+                        _ => HostCommand::SelectDisplay(index),
+                    };
+                    if commands.send(command).is_err() {
                         break;
                     }
                 }
@@ -893,7 +910,8 @@ fn host_desktop(
         permissions,
     );
 
-    let setup = |index: u32, generation: u64| {
+    let mut profile = sensor_media::VideoProfile::Balanced;
+    let setup = |index: u32, generation: u64, profile: sensor_media::VideoProfile| {
         let capture = desktop::Capture::new(index, consent).map_err(|error| {
             sensor_client::EndpointError::Desktop(format!("Capture monitor {index}: {error}"))
         })?;
@@ -917,17 +935,10 @@ fn host_desktop(
         } else {
             raw_height
         };
-        let (mut width, mut height) = sensor_media::stream_size(output_width, output_height)
+        let (width, height) = profile
+            .dimensions(output_width, output_height)
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
-        if internet {
-            let scale = (1280.0 / width as f64).min(720.0 / height as f64).min(1.0);
-            // Keep macroblock alignment after downscaling as well. Otherwise
-            // hardware H.264 decoders expose padded output dimensions that do
-            // not match the advertised frame and its NV12 plane offsets.
-            width = (((width as f64 * scale) as u32) & !15).max(16);
-            height = (((height as f64 * scale) as u32) & !15).max(16);
-        }
-        let fps = if internet { 15 } else { 30 };
+        let fps = profile.fps();
         let bitrate = if internet { 1_500_000 } else { 4_000_000 };
         let encoder = codec::H264Encoder::new(width, height, fps, bitrate, true)
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
@@ -947,7 +958,7 @@ fn host_desktop(
         Ok::<_, sensor_client::EndpointError>((capture, encoder, format))
     };
 
-    let (initial_capture, initial_encoder, mut format) = setup(selected, generation)?;
+    let (initial_capture, initial_encoder, mut format) = setup(selected, generation, profile)?;
     let mut capture = Some(initial_capture);
     let mut encoder = Some(initial_encoder);
     desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
@@ -976,7 +987,15 @@ fn host_desktop(
                 break;
             };
             match command {
-                HostCommand::SelectDisplay(index) => {
+                command @ (HostCommand::SelectDisplay(_) | HostCommand::SelectVideoProfile(_)) => {
+                    let index = match command {
+                        HostCommand::SelectDisplay(index) => index,
+                        HostCommand::SelectVideoProfile(next) => {
+                            profile = next;
+                            format.display.index
+                        }
+                        _ => unreachable!(),
+                    };
                     if index >= displays.len() as u32 {
                         return Err(sensor_client::EndpointError::Desktop(
                             "Unknown monitor selected.".into(),
@@ -987,7 +1006,8 @@ fn host_desktop(
                     // one process. Release the old capture before reopening it.
                     drop(capture.take());
                     drop(encoder.take());
-                    let (next_capture, next_encoder, next_format) = setup(index, next_generation)?;
+                    let (next_capture, next_encoder, next_format) =
+                        setup(index, next_generation, profile)?;
                     generation = next_generation;
                     capture = Some(next_capture);
                     encoder = Some(next_encoder);
@@ -1257,7 +1277,8 @@ fn execute_remote(
                 }
                 Message::Desktop(DesktopMessage::Error(error)) => return Err(error),
                 Message::Desktop(DesktopMessage::Input { .. })
-                | Message::Desktop(DesktopMessage::SelectDisplay(_)) => {
+                | Message::Desktop(DesktopMessage::SelectDisplay(_))
+                | Message::Desktop(DesktopMessage::SelectVideoProfile(_)) => {
                     return Err("Peer sent an invalid desktop command.".into())
                 }
                 _ => return Err("Unexpected message in remote desktop session.".into()),

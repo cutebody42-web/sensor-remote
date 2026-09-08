@@ -182,6 +182,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 request_clipboard: false,
                 actual_size: false,
                 fullscreen: false,
+                video_profile: sensor_media::VideoProfile::Balanced,
+                fps_sample: (Instant::now(), 0, 0.0),
                 remote_source_listener: false,
                 remote_buttons: [false; 3],
                 remote_focused: false,
@@ -256,6 +258,8 @@ struct App {
     request_clipboard: bool,
     actual_size: bool,
     fullscreen: bool,
+    video_profile: sensor_media::VideoProfile,
+    fps_sample: (Instant, u64, f64),
     remote_source_listener: bool,
     remote_buttons: [bool; 3],
     remote_focused: bool,
@@ -559,6 +563,8 @@ impl App {
             self.remote_focused = false;
             self.remote_buttons = [false; 3];
             self.remote_modifiers = [false; 3];
+            self.video_profile = sensor_media::VideoProfile::Balanced;
+            self.fps_sample = (Instant::now(), 0, 0.0);
             self.remote_control = false;
             self.remote_source_listener = false;
         }
@@ -1332,11 +1338,28 @@ impl App {
         });
     }
     fn remote(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("Disconnect").clicked() {
-                self.stop();
+                self.release_remote_input();
+                if self.remote_source_listener {
+                    self.stop();
+                } else if let Some(job) = &self.job {
+                    // Closing an outbound session must not take this device
+                    // offline for future incoming connections.
+                    job.control.stop();
+                }
             }
-            if ui.checkbox(&mut self.fullscreen, "Fullscreen").changed() {
+            if ui
+                .button(if self.fullscreen {
+                    "Exit full screen"
+                } else {
+                    "Full screen"
+                })
+                .on_hover_text("Ctrl+Alt+F")
+                .clicked()
+            {
+                self.release_remote_input();
+                self.fullscreen = !self.fullscreen;
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
             }
@@ -1354,23 +1377,58 @@ impl App {
                     control.set_clipboard_enabled(enabled);
                 }
                 let (frames, bytes, rtt) = control.statistics();
-                ui.label(format!("{frames} decoded frames · {bytes} video bytes"));
+                let elapsed = self.fps_sample.0.elapsed().as_secs_f64();
+                if elapsed >= 1.0 {
+                    self.fps_sample = (
+                        Instant::now(),
+                        frames,
+                        frames.saturating_sub(self.fps_sample.1) as f64 / elapsed,
+                    );
+                }
+                ui.label(format!(
+                    "Measured {:.1} fps · {frames} frames · {} KiB",
+                    self.fps_sample.2,
+                    bytes / 1024
+                ));
                 if rtt > 0 {
                     ui.label(format!("RTT {:.1} ms", rtt as f64 / 1000.0));
                 }
             }
         });
+        if self.remote_frame.is_some() && !self.remote_source_listener {
+            ui.horizontal_wrapped(|ui| {
+                let mut profile = self.video_profile;
+                egui::ComboBox::from_id_salt("video-quality")
+                    .selected_text(profile.label())
+                    .show_ui(ui, |ui| {
+                        for choice in [sensor_media::VideoProfile::Balanced, sensor_media::VideoProfile::SharpText, sensor_media::VideoProfile::Smooth] {
+                            ui.selectable_value(&mut profile, choice, choice.label());
+                        }
+                    });
+                if profile != self.video_profile {
+                    self.release_remote_input();
+                    if let Some(control) = self.active_remote_control() {
+                        if control.send_remote(DesktopMessage::SelectVideoProfile(profile)) {
+                            self.video_profile = profile;
+                        }
+                    }
+                }
+                ui.label("Both PCs: 0.3.4+. Actual fps depends on motion, hardware and network; Internet video remains capped at 1.5 Mbps.");
+            });
+        }
         let mode_label = if self.remote_control {
             "control enabled"
         } else {
             "view only"
         };
-        title(
-            ui,
-            "REMOTE DESKTOP",
-            "See the other Windows screen.",
-            "Attended H.264 video with explicit local consent.",
-        );
+        if self.remote_frame.is_none() {
+            title(
+                ui,
+                "REMOTE DESKTOP",
+                "See the other Windows screen.",
+                "Attended H.264 video with explicit local consent.",
+            );
+        }
         ui.label(
             RichText::new(format!("Permission profile: {mode_label}"))
                 .strong()
@@ -1910,6 +1968,15 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.page == Page::Remote
+            && ctx.input_mut(|input| {
+                input.consume_key(egui::Modifiers::CTRL | egui::Modifiers::ALT, egui::Key::F)
+            })
+        {
+            self.release_remote_input();
+            self.fullscreen = !self.fullscreen;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        }
         self.poll();
         if let Some(receiver) = &self.update_check {
             ctx.request_repaint_after(Duration::from_millis(100));
@@ -1930,7 +1997,7 @@ impl eframe::App for App {
         }
         if self.session_active() {
             ctx.request_repaint_after(Duration::from_millis(if self.remote_frame.is_some() {
-                33
+                16
             } else {
                 100
             }));
@@ -1955,7 +2022,10 @@ impl eframe::App for App {
                     }
                 });
             });
-        egui::SidePanel::left("navigation")
+        // Give the actual desktop the working area once video arrives.
+        // Disconnect and the always-visible safety control remain available.
+        if self.page != Page::Remote || self.remote_frame.is_none() {
+            egui::SidePanel::left("navigation")
             .exact_width(218.0)
             .resizable(false)
             .frame(egui::Frame::new().fill(Color32::WHITE).inner_margin(20))
@@ -2045,9 +2115,21 @@ impl eframe::App for App {
                     );
                 });
             });
+        }
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(PAPER).inner_margin(28))
+            .frame(
+                egui::Frame::new()
+                    .fill(PAPER)
+                    .inner_margin(if self.page == Page::Remote { 12 } else { 28 }),
+            )
             .show(ctx, |ui| {
+                if self.page == Page::Remote {
+                    ui.add_enabled_ui(self.consent.is_none(), |ui| self.remote(ui));
+                    if let Some(notice) = &self.notice {
+                        ui.label(notice);
+                    }
+                    return;
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("page-scroll")
                     .show(ui, |ui| {

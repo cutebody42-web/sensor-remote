@@ -100,6 +100,43 @@ pub struct VideoFormat {
     pub encoder: String,
     pub hardware: bool,
 }
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum VideoProfile {
+    #[default]
+    Balanced,
+    SharpText,
+    Smooth,
+}
+impl VideoProfile {
+    pub fn fps(self) -> u32 {
+        match self {
+            Self::Balanced => 30,
+            Self::SharpText => 15,
+            Self::Smooth => 60,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "Balanced · up to 720p / 30 fps",
+            Self::SharpText => "Sharp text · up to 1080p / 15 fps",
+            Self::Smooth => "Smooth · up to 720p / 60 fps",
+        }
+    }
+    pub fn dimensions(self, width: u32, height: u32) -> Result<(u32, u32), MediaError> {
+        let (width, height) = stream_size(width, height)?;
+        let (max_w, max_h) = if self == Self::SharpText {
+            (1920.0, 1080.0)
+        } else {
+            (1280.0, 720.0)
+        };
+        let scale = (max_w / width as f64).min(max_h / height as f64).min(1.0);
+        Ok((
+            ((width as f64 * scale) as u32 / 16 * 16).max(16),
+            ((height as f64 * scale) as u32 / 16 * 16).max(16),
+        ))
+    }
+}
 impl VideoFormat {
     pub fn validate(&self) -> Result<(), MediaError> {
         self.display.validate()?;
@@ -148,6 +185,8 @@ pub enum DesktopMessage {
     Error(String),
     // Appended variants preserve existing postcard discriminants.
     ClipboardText(String),
+    // Optional 0.3.4+ viewer command. Both endpoints must be updated.
+    SelectVideoProfile(VideoProfile),
 }
 
 #[derive(Clone, Debug)]
@@ -372,6 +411,29 @@ impl Assembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn video_profiles_are_bounded_and_never_upscale_small_displays() {
+        for profile in [
+            VideoProfile::Balanced,
+            VideoProfile::SharpText,
+            VideoProfile::Smooth,
+        ] {
+            assert_eq!(profile.dimensions(960, 720).unwrap(), (960, 720));
+            let (width, height) = profile.dimensions(3840, 2160).unwrap();
+            assert!(
+                width <= 1920
+                    && height <= 1080
+                    && width.is_multiple_of(16)
+                    && height.is_multiple_of(16)
+            );
+            assert!(profile.fps() <= 60);
+        }
+        assert_eq!(VideoProfile::Smooth.fps(), 60);
+        assert_eq!(
+            VideoProfile::SharpText.dimensions(1920, 1080).unwrap(),
+            (1920, 1072)
+        );
+    }
     #[test]
     fn clipboard_is_utf8_bounded_and_rejects_embedded_nul() {
         assert!(validate_clipboard("").is_ok());

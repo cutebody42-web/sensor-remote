@@ -428,51 +428,100 @@ fn local_stream(mut websocket: RenderWebSocket) -> Result<TcpStream, RenderError
 }
 
 fn bridge(mut tcp: TcpStream, mut websocket: RenderWebSocket) {
-    if tcp.set_read_timeout(Some(SOCKET_POLL)).is_err()
-        || tcp
-            .set_write_timeout(Some(Duration::from_secs(30)))
-            .is_err()
-        || set_socket_timeouts(&mut websocket, SOCKET_POLL, Duration::from_secs(30)).is_err()
-    {
+    // Polling two blocking sockets serially makes traffic in one direction
+    // wait for the other direction's OS timeout, even when data is ready.
+    // Keep one bounded pending write per direction and preserve partial I/O.
+    let nonblocking = match websocket.get_mut() {
+        MaybeTlsStream::Plain(stream) => stream.set_nonblocking(true),
+        MaybeTlsStream::Rustls(stream) => stream.sock.set_nonblocking(true),
+        _ => Err(io::Error::other("unsupported TLS stream")),
+    };
+    if tcp.set_nonblocking(true).is_err() || nonblocking.is_err() {
         let _ = tcp.shutdown(Shutdown::Both);
         return;
     }
+    websocket.set_config(|config| {
+        config.write_buffer_size = 0;
+        config.max_write_buffer_size = MAX_RELAY_BYTES + 64 * 1024;
+    });
     let mut buffer = vec![0u8; 64 * 1024];
+    let mut pending_tcp = Vec::new();
+    let mut tcp_offset = 0;
+    let mut pending_websocket = false;
+    let mut last_progress = Instant::now();
     loop {
-        match tcp.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(size) => {
-                if websocket
-                    .send(Message::binary(buffer[..size].to_vec()))
-                    .is_err()
-                {
-                    break;
+        let mut progressed = false;
+        if pending_websocket {
+            match websocket.flush() {
+                Ok(()) => {
+                    pending_websocket = false;
+                    progressed = true;
                 }
+                Err(tungstenite::Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                }
+                Err(_) => break,
             }
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
-            Err(_) => break,
         }
-        match websocket.read() {
-            Ok(Message::Binary(bytes)) if bytes.len() <= MAX_RELAY_BYTES => {
-                if tcp.write_all(&bytes).is_err() {
-                    break;
+        if !pending_websocket {
+            match tcp.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    progressed = true;
+                    match websocket.send(Message::binary(buffer[..size].to_vec())) {
+                        Ok(()) => {}
+                        // Tungstenite retains the exact unsent frame; flush it
+                        // without enqueuing a duplicate or reading more TCP.
+                        Err(tungstenite::Error::Io(error))
+                            if error.kind() == io::ErrorKind::WouldBlock =>
+                        {
+                            pending_websocket = true
+                        }
+                        Err(_) => break,
+                    }
                 }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => break,
             }
-            Ok(Message::Ping(payload)) => {
-                if websocket.send(Message::Pong(payload)).is_err() {
-                    break;
+        }
+        if tcp_offset == pending_tcp.len() {
+            pending_tcp.clear();
+            tcp_offset = 0;
+            match websocket.read() {
+                Ok(Message::Binary(bytes)) if bytes.len() <= MAX_RELAY_BYTES => {
+                    pending_tcp.extend_from_slice(&bytes);
+                    progressed = true;
                 }
+                Ok(Message::Ping(_)) => {
+                    pending_websocket = true;
+                    progressed = true;
+                }
+                Ok(Message::Pong(_)) => progressed = true,
+                Ok(_) => break,
+                Err(tungstenite::Error::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                }
+                Err(_) => break,
             }
-            Ok(Message::Pong(_)) => {}
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Text(_)) | Ok(Message::Frame(_)) => break,
-            Ok(Message::Binary(_)) => break,
-            Err(tungstenite::Error::Io(error))
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
-            Err(_) => break,
+        }
+        if tcp_offset < pending_tcp.len() {
+            match tcp.write(&pending_tcp[tcp_offset..]) {
+                Ok(0) => break,
+                Ok(size) => {
+                    tcp_offset += size;
+                    progressed = true;
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(_) => break,
+            }
+        }
+        if progressed {
+            last_progress = Instant::now();
+        } else {
+            if (pending_websocket || tcp_offset < pending_tcp.len())
+                && last_progress.elapsed() > Duration::from_secs(30)
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
         }
     }
     let _ = websocket.close(None);
@@ -672,6 +721,60 @@ fn read_until(
 mod tests {
     use super::*;
     #[test]
+    fn bridge_has_bounded_latency_when_only_one_direction_is_ready() {
+        use tungstenite::protocol::Role;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nodelay(true).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        server
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut peer = WebSocket::from_raw_socket(
+            server,
+            Role::Server,
+            Some(websocket_config(MAX_RELAY_BYTES)),
+        );
+        let socket = WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            Role::Client,
+            Some(websocket_config(MAX_RELAY_BYTES)),
+        );
+        let mut local = local_stream(socket).unwrap();
+        local
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        local
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let worker = thread::spawn(move || {
+            for index in 0..64u8 {
+                peer.send(Message::binary(vec![index; 4096])).unwrap();
+                let Message::Binary(reply) = peer.read().unwrap() else {
+                    panic!("unexpected frame");
+                };
+                assert_eq!(reply.as_ref(), &[index]);
+            }
+        });
+        let started = Instant::now();
+        for index in 0..64u8 {
+            let mut bytes = [0; 4096];
+            local.read_exact(&mut bytes).unwrap();
+            assert_eq!(bytes, [index; 4096]);
+            local.write_all(&[index]).unwrap();
+        }
+        worker.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "serial socket polling starved one direction: {:?}",
+            started.elapsed()
+        );
+    }
+    #[test]
     fn dns_resolution_obeys_cancellation_deadline_and_local_address() {
         let started = Instant::now();
         assert!(resolve(
@@ -696,6 +799,60 @@ mod tests {
             addresses,
             vec!["127.0.0.1:443".parse::<SocketAddr>().unwrap()]
         );
+    }
+    #[test]
+    fn bridge_preserves_multi_megabyte_bytes_with_slow_readers() {
+        use tungstenite::protocol::Role;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_nodelay(true).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        server.set_nodelay(true).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        server
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut peer = WebSocket::from_raw_socket(
+            server,
+            Role::Server,
+            Some(websocket_config(MAX_RELAY_BYTES)),
+        );
+        let socket = WebSocket::from_raw_socket(
+            MaybeTlsStream::Plain(client),
+            Role::Client,
+            Some(websocket_config(MAX_RELAY_BYTES)),
+        );
+        let mut local = local_stream(socket).unwrap();
+        local
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        local
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|n| (n % 251) as u8).collect();
+        let expected = payload.clone();
+        let worker = thread::spawn(move || {
+            for chunk in expected.chunks(MAX_RELAY_BYTES) {
+                peer.send(Message::binary(chunk.to_vec())).unwrap();
+            }
+            thread::sleep(Duration::from_millis(100));
+            let mut received = Vec::new();
+            while received.len() < expected.len() {
+                let Message::Binary(bytes) = peer.read().unwrap() else {
+                    panic!("unexpected frame");
+                };
+                received.extend_from_slice(&bytes);
+            }
+            assert_eq!(received, expected);
+        });
+        thread::sleep(Duration::from_millis(100));
+        let mut received = vec![0; payload.len()];
+        local.read_exact(&mut received).unwrap();
+        assert_eq!(received, payload);
+        local.write_all(&payload).unwrap();
+        worker.join().unwrap();
     }
     #[test]
     fn registration_message_is_stable_and_hex_is_strict() {

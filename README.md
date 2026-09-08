@@ -2,7 +2,7 @@
 
 SENSOR TECHNOLOGY · Designed by ENG Mohamed Sayed.
 
-Version **0.3.3 — Windows attended remote-desktop build with Internet
+Version **0.3.4 — Windows attended remote-desktop build with Internet
 transport**. The shipped package is configured for the verified Railway
 rendezvous service; this is still a development release without Authenticode,
 not a complete AnyDesk-equivalent product.
@@ -73,7 +73,7 @@ On 2026-09-07 the laptop and a separate cloud Windows computer passed real
 H.264 screen capture/decoding, synthetic mouse click, Unicode keyboard and
 wheel input through public WSS (GitHub run 34153021049, attempt 2). That used
 the native worker test client, not the installed GUI. See
-[0.3.3 fixes and current evidence](docs/RELEASE_0_3_3.md) for the subsequent
+[current fixes and evidence](docs/RELEASE_0_3_4.md) for the subsequent
 ID-only handshake and GUI input fixes. No numerical reliability guarantee
 or login/UAC support is claimed.
 See [parity](docs/PARITY_MATRIX.md), [deployment](docs/DEPLOYMENT.md), and

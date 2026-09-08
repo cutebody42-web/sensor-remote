@@ -24,11 +24,11 @@ jobs:
         with:
           toolchain: 1.98.1
       - name: Build actual native fixtures
-        run: cargo build -p sensor-desktop --example cross_desktop --example qa_target --locked
+        run: cargo build -p sensor-desktop --release --example cross_desktop --example qa_target --locked
       - name: Measure synthetic target and prepare identity
         shell: pwsh
         run: |
-          & '.\target\debug\examples\cross_desktop.exe' prepare-control (Join-Path $env:RUNNER_TEMP 'sensor-input-profile') (Join-Path $env:RUNNER_TEMP 'sensor-input-public.json') (Join-Path (Get-Location) 'target\debug\examples\qa_target.exe')
+          & '.\target\release\examples\cross_desktop.exe' prepare-control (Join-Path $env:RUNNER_TEMP 'sensor-input-profile') (Join-Path $env:RUNNER_TEMP 'sensor-input-public.json') (Join-Path (Get-Location) 'target\release\examples\qa_target.exe')
           if ($LASTEXITCODE) { throw 'Native target preparation failed' }
       - uses: actions/upload-artifact@v7
         with:
@@ -46,7 +46,7 @@ jobs:
         run: |
           if ($env:SENSOR_VIEWER_ID -notmatch '^[1-9][0-9]{8}$' -or $env:SENSOR_VIEWER_KEY -notmatch '^[0-9a-f]{64}$') { throw 'Invalid public identity' }
           $out = Join-Path $env:RUNNER_TEMP 'sensor-input.log'
-          & '.\target\debug\examples\cross_desktop.exe' host-control (Join-Path $env:RUNNER_TEMP 'sensor-input-profile') $env:SENSOR_VIEWER_ID $env:SENSOR_VIEWER_KEY (Join-Path (Get-Location) 'target\debug\examples\qa_target.exe') 2>&1 | Tee-Object -FilePath $out
+          & '.\target\release\examples\cross_desktop.exe' host-control (Join-Path $env:RUNNER_TEMP 'sensor-input-profile') $env:SENSOR_VIEWER_ID $env:SENSOR_VIEWER_KEY (Join-Path (Get-Location) 'target\release\examples\qa_target.exe') 2>&1 | Tee-Object -FilePath $out
           if ($LASTEXITCODE) { throw 'Native host failed' }
           $evidence = Get-Content $out -Raw
           if ($evidence -notmatch 'CROSS_COMPUTER_INPUT_PASS' -or $evidence -notmatch 'CROSS_DESKTOP_HOST_PASS') { throw 'Two-computer native control has not passed' }

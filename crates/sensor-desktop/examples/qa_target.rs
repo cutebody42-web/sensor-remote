@@ -13,11 +13,14 @@ fn main() -> eframe::Result {
         fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
             self.frames += 1;
             egui::CentralPanel::default().show(ctx, |ui| {
+                ui.style_mut().override_font_id = Some(egui::FontId::proportional(22.0));
                 ui.heading("SENSOR · real remote-input test");
                 ui.label("This window contains synthetic test data only.");
                 let pulse = if (self.frames / 8).is_multiple_of(2) { egui::Color32::from_rgb(10,190,180) } else { egui::Color32::from_rgb(30,60,95) };
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(360.0,100.0), egui::Sense::hover());
                 ui.painter().rect_filled(rect, 8.0, pulse);
+                let moving = egui::Rect::from_min_size(rect.min + egui::vec2((self.frames % 330) as f32, 25.0), egui::vec2(20.0, 50.0));
+                ui.painter().rect_filled(moving, 3.0, egui::Color32::WHITE);
                 ui.label("Remote test input:");
                 let response = ui.add(egui::TextEdit::singleline(&mut self.text).desired_width(360.0));
                 // Explicit cloud fixture only: focus its own editable surface.
@@ -28,6 +31,7 @@ fn main() -> eframe::Result {
                 }
                 if response.clicked() { self.clicked += 1; }
                 self.wheel |= ctx.input(|i| i.raw_scroll_delta.y != 0.0);
+                ui.label(format!("Verified clicks: {} | Wheel received: {} | Exact text: {}", self.clicked, self.wheel, self.text == "SENSOR QA مرحبا 123"));
                 let viewport = ctx.input(|i| i.viewport().clone());
                 if let Some(inner) = viewport.inner_rect {
                     let position = (inner.min.to_vec2() + response.rect.center().to_vec2()) * ctx.pixels_per_point();
@@ -43,7 +47,13 @@ fn main() -> eframe::Result {
                     }
                 }
             });
-            ctx.request_repaint_after(std::time::Duration::from_millis(66));
+            ctx.request_repaint_after(std::time::Duration::from_millis(
+                if std::env::var_os("SENSOR_QA_CLOUD_FOCUS").is_some() {
+                    16
+                } else {
+                    66
+                },
+            ));
         }
     }
     let Some(path) = std::env::args_os().nth(1) else {
@@ -55,6 +65,7 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([440.0, 340.0])
+                .with_maximized(std::env::var_os("SENSOR_QA_CLOUD_FOCUS").is_some())
                 .with_position([120.0, 120.0]),
             renderer: eframe::Renderer::Wgpu,
             ..Default::default()
