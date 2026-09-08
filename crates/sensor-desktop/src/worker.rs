@@ -143,7 +143,28 @@ impl Control {
         )
     }
     pub fn stop(&self) {
-        self.local_stop.store(true, Ordering::SeqCst);
+        if self.local_stop.swap(true, Ordering::SeqCst) {
+            self.abort();
+            return;
+        }
+        self.set_clipboard_enabled(false);
+        let sender = self
+            .remote_sender
+            .lock()
+            .ok()
+            .and_then(|mut sender| sender.take());
+        if sender.is_some_and(|sender| sender.try_send(DesktopMessage::Close).is_ok()) {
+            // Block further input immediately; allow a bounded close acknowledgement.
+            let control = self.clone();
+            thread::spawn(move || {
+                let until = Instant::now() + Duration::from_millis(750);
+                while !control.is_stopped() && Instant::now() < until {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                control.abort();
+            });
+            return;
+        }
         self.abort();
     }
     pub fn was_stopped_locally(&self) -> bool {
@@ -151,8 +172,11 @@ impl Control {
     }
     fn abort(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
-        if let Ok(socket) = self.socket.lock() {
-            if let Some(socket) = socket.as_ref() {
+        self.close_socket();
+    }
+    fn close_socket(&self) {
+        if let Ok(mut socket) = self.socket.lock() {
+            if let Some(socket) = socket.take() {
                 socket.abort();
             }
         }
@@ -161,6 +185,9 @@ impl Control {
         self.cancelled.load(Ordering::SeqCst)
     }
     pub fn send_remote(&self, message: DesktopMessage) -> bool {
+        if self.was_stopped_locally() || self.is_stopped() {
+            return false;
+        }
         let sender = self
             .remote_sender
             .lock()
@@ -503,6 +530,10 @@ fn execute(
                     if (listener.is_some() || matches!(route, Route::Render(_)))
                         && !control.is_stopped() =>
                 {
+                    // The cancellation handle owns a cloned socket. Dropping
+                    // only the failed handshake's stream leaves the peer
+                    // waiting until Windows reports 10060.
+                    control.close_socket();
                     status(format!(
                         "Unverified connection refused ({error}). Still listening."
                     ))?;
@@ -1074,10 +1105,11 @@ fn execute_remote(
             route.label()
         )))
         .map_err(|_| "Window closed".to_owned())?;
-    let stream = connect_route(&route, &identity, peer, control)?;
+    let stream = connect_route(&route, &identity, peer, control)
+        .map_err(|error| format!("Could not reach the remote device: {error}"))?;
     control.socket(&stream)?;
     let mut connection = SecureConnection::initiate(stream, &identity, peer, DEFAULT_TIMEOUT)
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("Remote identity handshake failed: {error}. Check that the other device is online and uses a compatible SENSOR version."))?;
     connection
         .set_timeout(Duration::from_secs(120))
         .map_err(|error| error.to_string())?;
@@ -1256,6 +1288,24 @@ fn execute_remote(
 mod tests {
     use super::*;
     #[test]
+    fn local_viewer_stop_sends_close_blocks_new_input_and_has_a_deadline() {
+        let control = Control::default();
+        let (sender, receiver) = mpsc::sync_channel(2);
+        *control.remote_sender.lock().unwrap() = Some(sender);
+        control.stop();
+        assert!(control.was_stopped_locally());
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_millis(50)).unwrap(),
+            DesktopMessage::Close
+        ));
+        assert!(!control.send_remote(DesktopMessage::Ping(1)));
+        let until = Instant::now() + Duration::from_secs(2);
+        while !control.is_stopped() && Instant::now() < until {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(control.is_stopped());
+    }
+    #[test]
     fn automatic_acceptance_cannot_be_combined_with_unknown_peers() {
         for (accept_any, public_key) in [(true, [1; 32]), (false, [0; 32])] {
             let root = tempfile::tempdir().unwrap();
@@ -1301,6 +1351,22 @@ mod tests {
         assert!(!control.was_stopped_locally());
         control.stop();
         assert!(control.was_stopped_locally());
+    }
+    #[test]
+    fn rejected_handshake_closes_retained_socket_without_stopping_listener() {
+        use std::io::Read;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        let control = Control::default();
+        control.socket(&stream).unwrap();
+        drop(stream);
+        control.close_socket();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        assert!(!control.is_stopped());
+        assert!(!control.was_stopped_locally());
+        assert!(control.socket.lock().unwrap().is_none());
     }
     #[test]
     fn cancelling_a_listener_releases_the_socket_and_finishes() {

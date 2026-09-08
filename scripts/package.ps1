@@ -2,7 +2,9 @@ param([string]$OutputDirectory)
 $ErrorActionPreference = 'Stop'
 $repoPath = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 if (-not $OutputDirectory) {
-    $OutputDirectory = Join-Path (Split-Path -Parent $repoPath) 'SENSOR-Windows-0.3.2'
+    $sensorVersion = (Select-String -LiteralPath (Join-Path $repoPath 'Cargo.toml') -Pattern '^version = "([0-9.]+)"$').Matches.Groups[1].Value
+    if (!$sensorVersion) { throw 'Could not resolve workspace version' }
+    $OutputDirectory = Join-Path (Split-Path -Parent $repoPath) ('SENSOR-Windows-' + $sensorVersion)
 }
 $packagePath = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $packagePath) {

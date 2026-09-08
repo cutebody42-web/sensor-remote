@@ -127,6 +127,7 @@ mod fixture {
                     accepted = allow;
                 }
                 Ok(Event::Online(true)) => println!("DESKTOP_HOST_ONLINE pinned_viewer_only=true"),
+                Ok(Event::Status(status)) => println!("DESKTOP_HOST_STATUS {status}"),
                 Ok(Event::Finished(result)) => {
                     result?;
                     let (captured, encoded) = job.control.capture_statistics();

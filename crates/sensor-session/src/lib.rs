@@ -124,7 +124,10 @@ pub fn accept_hello(
     if client_hello.device_id != expected.device_id
         || client_hello.identity_public_key != expected.public_key
         || client_hello.target_device_id != device_id
-        || client_hello.target_identity_key != identity.public_key()
+        // The caller may know only our device ID on its first connection.
+        // This never relaxes our independently pinned caller identity above.
+        || (client_hello.target_identity_key != [0; 32]
+            && client_hello.target_identity_key != identity.public_key())
     {
         return Err(SessionError::PeerMismatch);
     }
@@ -322,6 +325,65 @@ mod tests {
             ),
             Err(SessionError::Crypto(CryptoError::SignatureVerification))
         ));
+    }
+
+    #[test]
+    fn id_only_caller_can_reach_a_host_that_pins_its_identity() {
+        let caller = IdentityKeypair::from_seed([11; 32]);
+        let host = IdentityKeypair::from_seed([12; 32]);
+        let caller_id = DeviceId::new(111_222_333).unwrap();
+        let host_id = DeviceId::new(444_555_666).unwrap();
+        let pin = ExpectedPeer {
+            device_id: caller_id,
+            public_key: caller.public_key(),
+        };
+        let (pending, hello) = start_initiator(
+            &caller,
+            caller_id,
+            ExpectedPeer {
+                device_id: host_id,
+                public_key: [0; 32],
+            },
+        );
+        let (responder, response) = accept_hello(&host, host_id, hello, pin).unwrap();
+        let mut initiator = finish_initiator(pending, response).unwrap();
+        let mut responder = finish_responder(responder).unwrap();
+        assert_eq!(responder.peer_identity_key(), caller.public_key());
+        assert_eq!(initiator.peer_identity_key(), host.public_key());
+        let record = initiator.seal(b"test", b"id-only").unwrap();
+        assert_eq!(responder.open(&record, b"test").unwrap(), b"id-only");
+    }
+
+    #[test]
+    fn id_only_never_relaxes_caller_pin_signature_or_target_id() {
+        let caller = IdentityKeypair::from_seed([11; 32]);
+        let host = IdentityKeypair::from_seed([12; 32]);
+        let stranger = IdentityKeypair::from_seed([13; 32]);
+        let caller_id = DeviceId::new(111_222_333).unwrap();
+        let host_id = DeviceId::new(444_555_666).unwrap();
+        let pin = ExpectedPeer {
+            device_id: caller_id,
+            public_key: caller.public_key(),
+        };
+        for (identity, target_id, target_key, corrupt_signature) in [
+            (&stranger, host_id, [0; 32], false),
+            (&caller, caller_id, [0; 32], false),
+            (&caller, host_id, stranger.public_key(), false),
+            (&caller, host_id, [0; 32], true),
+        ] {
+            let (_, mut hello) = start_initiator(
+                identity,
+                caller_id,
+                ExpectedPeer {
+                    device_id: target_id,
+                    public_key: target_key,
+                },
+            );
+            if corrupt_signature {
+                hello.signature[0] ^= 1;
+            }
+            assert!(accept_hello(&host, host_id, hello, pin).is_err());
+        }
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::remote_input;
 use eframe::egui::{self, Color32, FontId, RichText, Stroke, Vec2};
 use sensor_client::Mode;
 use sensor_core::DeviceId;
@@ -8,7 +9,7 @@ use sensor_desktop::{
 };
 use sensor_files::TransferId;
 use sensor_identity::{DeviceIdentity, IdentityFileStore};
-use sensor_media::{DecodedFrame, DesktopMessage, Display, Input, MouseButton, VideoFormat};
+use sensor_media::{DecodedFrame, DesktopMessage, Display, Input, VideoFormat};
 use sensor_session::ExpectedPeer;
 use sensor_windows::UserDpapi;
 use std::{
@@ -957,7 +958,7 @@ impl App {
             ui,
             "YOUR WORKSPACE",
             "Connect with confidence.",
-            "Choose a trusted device. Every incoming session needs your approval.",
+            "Connect by ID. Unknown devices need approval; verified devices can have a saved unattended grant.",
         );
         card(ui, |ui| {
             ui.label(RichText::new("This device").strong());
@@ -1175,7 +1176,7 @@ impl App {
                     }
                 }
             });
-            ui.label(RichText::new("SENSOR must be running on both Windows computers. The remote owner must approve each Internet session. Unattended access is not available in this build.").size(12.0).color(MUTED));
+            ui.label(RichText::new("Keep SENSOR online on both unlocked Windows computers. Approve the first connection, or authorize a verified device in Trusted devices for unattended screen/control.").size(12.0).color(MUTED));
         });
     }
     fn files(&mut self, ui: &mut egui::Ui) {
@@ -1460,6 +1461,11 @@ impl App {
             };
             let response = egui::ScrollArea::both()
                 .id_salt("remote-video-pan")
+                .scroll_source(if self.remote_control {
+                    egui::scroll_area::ScrollSource::SCROLL_BAR
+                } else {
+                    egui::scroll_area::ScrollSource::ALL
+                })
                 .auto_shrink([false, false])
                 .max_height(available.y.max(160.0))
                 .show(ui, |ui| {
@@ -1487,36 +1493,37 @@ impl App {
             let hovered = response.hovered();
             if self.remote_control {
                 if let Some(pos) = response.hover_pos() {
-                    let x = ((pos.x - response.rect.left()) / response.rect.width()
-                        * display.width as f32)
-                        .floor()
-                        .clamp(0.0, display.width.saturating_sub(1) as f32)
-                        as u32;
-                    let y = ((pos.y - response.rect.top()) / response.rect.height()
-                        * display.height as f32)
-                        .floor()
-                        .clamp(0.0, display.height.saturating_sub(1) as f32)
-                        as u32;
-                    if hovered {
+                    let (x, y) = remote_input::pointer_position(
+                        pos,
+                        response.rect,
+                        [display.width, display.height],
+                    );
+                    if hovered
+                        || (self.remote_buttons.iter().any(|held| *held) && response.dragged())
+                    {
                         self.send_remote(Input::Move { x, y });
                     }
                 }
-                let pointer = ui.ctx().input(|input| {
-                    [
-                        input.pointer.primary_down(),
-                        input.pointer.secondary_down(),
-                        input.pointer.middle_down(),
-                    ]
-                });
-                for (index, down) in pointer.into_iter().enumerate() {
-                    let allowed = hovered || self.remote_buttons[index];
-                    if allowed && down != self.remote_buttons[index] {
-                        let button = match index {
-                            0 => MouseButton::Left,
-                            1 => MouseButton::Right,
-                            _ => MouseButton::Middle,
-                        };
-                        if self.send_remote(Input::Button { button, down }) {
+                // Preserve press/release pairs within one frame: state polling
+                // loses rapid clicks completely when the final state is "up".
+                let pointer_events = ui.ctx().input(|input| input.events.clone());
+                for event in pointer_events {
+                    let owns_pointer = match &event {
+                        egui::Event::PointerButton { pos, .. } => {
+                            ui.ctx().layer_id_at(*pos) == Some(response.layer_id)
+                        }
+                        _ => false,
+                    };
+                    if let Some((index, down, packet)) = remote_input::pointer_button(
+                        &event,
+                        response.rect,
+                        response.interact_rect,
+                        owns_pointer,
+                        [display.width, display.height],
+                        &self.remote_buttons,
+                    ) {
+                        let [position, button] = packet;
+                        if self.send_remote(position) && self.send_remote(button) {
                             self.remote_buttons[index] = down;
                         }
                     }
@@ -1539,19 +1546,28 @@ impl App {
                         }
                     }
                 }
-                let scroll = ui.ctx().input(|input| input.smooth_scroll_delta);
-                if hovered && (scroll.x != 0.0 || scroll.y != 0.0) {
-                    if scroll.y != 0.0 {
-                        self.send_remote(Input::Wheel {
-                            delta: (scroll.y * 120.0).round().clamp(-12_000.0, 12_000.0) as i32,
-                            horizontal: false,
-                        });
-                    }
-                    if scroll.x != 0.0 {
-                        self.send_remote(Input::Wheel {
-                            delta: (scroll.x * 120.0).round().clamp(-12_000.0, 12_000.0) as i32,
-                            horizontal: true,
-                        });
+                if hovered {
+                    let wheels = ui.ctx().input_mut(|input| {
+                        input.smooth_scroll_delta = Vec2::ZERO;
+                        input.raw_scroll_delta = Vec2::ZERO;
+                        input
+                            .events
+                            .iter()
+                            .filter_map(|event| {
+                                if let egui::Event::MouseWheel { unit, delta, .. } = event {
+                                    Some(remote_input::wheel_delta(*unit, *delta))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    });
+                    for [horizontal, vertical] in wheels {
+                        for (delta, horizontal) in [(horizontal, true), (vertical, false)] {
+                            if delta != 0 {
+                                self.send_remote(Input::Wheel { delta, horizontal });
+                            }
+                        }
                     }
                 }
                 if focused {
@@ -1564,10 +1580,9 @@ impl App {
                             egui::Event::Key {
                                 key,
                                 pressed,
-                                repeat,
                                 modifiers,
                                 ..
-                            } if !repeat || !pressed => {
+                            } => {
                                 if let Some(key) = virtual_key(key) {
                                     let text_key = (0x30..=0x5A).contains(&key)
                                         || key == 0x20
@@ -1998,7 +2013,7 @@ impl eframe::App for App {
                 );
                 ui.label(
                     RichText::new(
-                        "Internet registration stays active while SENSOR is open. Incoming Internet sessions require your approval.",
+                        "Keep SENSOR open and online. Only explicitly authorized verified devices can connect unattended.",
                     )
                     .size(12.0)
                     .color(MUTED),

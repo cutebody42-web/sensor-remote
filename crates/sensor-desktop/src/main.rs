@@ -1,6 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod remote_input;
+#[cfg(windows)]
 mod ui;
 
 #[cfg(windows)]

@@ -3003,7 +3003,7 @@ checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
 name = "sensor-audit"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "fs2",
  "sensor-core",
@@ -3017,7 +3017,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-client"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "sensor-audit",
  "sensor-core",
@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "postcard",
  "rand_core 0.6.4",
@@ -3047,7 +3047,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-crypto"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-desktop"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "eframe",
  "fs2",
@@ -3089,7 +3089,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-files"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "cap-std",
  "fs2",
@@ -3104,7 +3104,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-identity"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "fs2",
  "postcard",
@@ -3119,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-media"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -3127,7 +3127,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-protocol"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "postcard",
  "sensor-core",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-relay"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rand_core 0.6.4",
  "sensor-crypto",
@@ -3150,7 +3150,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-render"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rand_core 0.6.4",
  "rustls",
@@ -3167,7 +3167,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-rendezvous"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rand_core 0.6.4",
  "sensor-audit",
@@ -3189,7 +3189,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-session"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rand_core 0.6.4",
  "sensor-core",
@@ -3201,7 +3201,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-transport"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "sensor-core",
  "sensor-crypto",
@@ -3214,7 +3214,7 @@ dependencies = [
 
 [[package]]
 name = "sensor-windows"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "arboard",
  "sensor-identity",

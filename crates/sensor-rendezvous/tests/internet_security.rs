@@ -6,9 +6,9 @@ use sensor_render::{
 use sensor_session::ExpectedPeer;
 use sensor_transport::connection::SecureConnection;
 use std::{
-    io::{Read, Write},
-    net::{TcpListener, TcpStream},
-    process::{Child, Command},
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
+    process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
@@ -30,17 +30,31 @@ impl Drop for LocalServer {
     }
 }
 fn server() -> LocalServer {
-    let probe = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = probe.local_addr().unwrap().port();
-    drop(probe);
-    let process = Command::new(env!("CARGO_BIN_EXE_sensor-rendezvous"))
-        .env("PORT", port.to_string())
+    let mut process = Command::new(env!("CARGO_BIN_EXE_sensor-rendezvous"))
+        .env("PORT", "0")
+        .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let server = LocalServer {
+    let output = process.stdout.take().unwrap();
+    let (send, receive) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        for line in BufReader::new(output).lines().map_while(Result::ok) {
+            if let Some(address) = line.strip_prefix("SENSOR_LISTEN_ADDRESS=") {
+                let _ = send.try_send(address.to_owned());
+            }
+        }
+    });
+    let mut server = LocalServer {
         process,
-        url: format!("http://127.0.0.1:{port}"),
+        url: String::new(),
     };
+    let address: std::net::SocketAddr = receive
+        .recv_timeout(Duration::from_secs(5))
+        .expect("server did not report its actual bound address")
+        .parse()
+        .unwrap();
+    let port = address.port();
+    server.url = format!("http://127.0.0.1:{port}");
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
@@ -84,9 +98,21 @@ impl LocalInteraction for Decision {
 }
 
 fn encrypted_roundtrip(server: &str, mode: Mode, consent: bool) {
+    encrypted_roundtrip_with_trust(server, mode, consent, false);
+}
+
+fn encrypted_roundtrip_with_trust(server: &str, mode: Mode, consent: bool, id_only: bool) {
     let host = DeviceIdentity::generate();
     let client = DeviceIdentity::generate();
     let host_pin = pin(&host);
+    let target = if id_only {
+        ExpectedPeer {
+            device_id: host_pin.device_id,
+            public_key: [0; 32],
+        }
+    } else {
+        host_pin
+    };
     let client_pin = pin(&client);
     let root = tempfile::tempdir().unwrap();
     let received = root.path().join("received");
@@ -96,7 +122,7 @@ fn encrypted_roundtrip(server: &str, mode: Mode, consent: bool) {
     let payload: Vec<u8> = (0..1_048_737).map(|n| (n % 251) as u8).collect();
     std::fs::write(&file, &payload).unwrap();
     let host_handle = listen(server, host.clone());
-    let stream = connect(server, &client, host_pin, TIMEOUT).unwrap();
+    let stream = connect(server, &client, target, TIMEOUT).unwrap();
     let host_stream = host_handle.join().unwrap();
     let receive_path = received.clone();
     let audit_path = audit.clone();
@@ -113,7 +139,7 @@ fn encrypted_roundtrip(server: &str, mode: Mode, consent: bool) {
         )
         .unwrap();
     });
-    let mut connection = SecureConnection::initiate(stream, &client, host_pin, TIMEOUT).unwrap();
+    let mut connection = SecureConnection::initiate(stream, &client, target, TIMEOUT).unwrap();
     if !consent {
         assert!(sensor_client::request(&mut connection, mode).is_err());
     } else if matches!(mode, Mode::FileTransfer) {
@@ -155,6 +181,13 @@ fn encrypted_chat_file_and_denial_over_local_websocket() {
     encrypted_roundtrip(&server.url, Mode::Chat, true);
     encrypted_roundtrip(&server.url, Mode::FileTransfer, true);
     encrypted_roundtrip(&server.url, Mode::FileTransfer, false);
+}
+
+#[test]
+fn id_only_connection_to_pinned_host_works_through_rendezvous() {
+    let server = server();
+    encrypted_roundtrip_with_trust(&server.url, Mode::Chat, true, true);
+    encrypted_roundtrip_with_trust(&server.url, Mode::FileTransfer, false, true);
 }
 
 #[test]

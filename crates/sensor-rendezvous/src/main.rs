@@ -87,6 +87,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|_| "PORT must be a valid TCP port")?;
     let bind = format!("0.0.0.0:{port}");
     let listener = TcpListener::bind(&bind)?;
+    // Report the socket actually reserved by the OS, including PORT=0.
+    println!("SENSOR_LISTEN_ADDRESS={}", listener.local_addr()?);
     let limits = Limits {
         max_bitrate: optional_u64("RELAY_MAX_BITRATE")?.or(Some(2_000_000)),
         max_fps: optional_u64("RELAY_MAX_FPS")?
