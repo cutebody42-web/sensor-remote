@@ -190,6 +190,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 remote_buttons: [false; 3],
                 remote_focused: false,
                 remote_modifiers: [false; 3],
+                remote_close_at: None,
             };
             if app.use_render && !app.render_server.trim().is_empty() {
                 app.start_render_listener();
@@ -268,6 +269,7 @@ struct App {
     remote_buttons: [bool; 3],
     remote_focused: bool,
     remote_modifiers: [bool; 3],
+    remote_close_at: Option<Instant>,
 }
 
 fn card(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui)) {
@@ -558,6 +560,7 @@ impl App {
             }
         }
         if self.remote_source_listener == source_listener {
+            self.remote_close_at = None;
             self.remote_frame = None;
             self.remote_texture = None;
             self.uploaded_frame = None;
@@ -613,6 +616,7 @@ impl App {
         }
         self.remote_control = matches!(&task, Task::Remote { control: true, .. });
         if matches!(&task, Task::Remote { .. }) {
+            self.remote_close_at = None;
             self.page = Page::Remote;
             self.remote_source_listener = false;
             self.remote_frame = None;
@@ -1344,15 +1348,28 @@ impl App {
         });
     }
     fn remote(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Disconnect").clicked() {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    self.remote_close_at.is_none(),
+                    egui::Button::new("Disconnect"),
+                )
+                .clicked()
+            {
                 self.release_remote_input();
                 if self.remote_source_listener {
                     self.stop();
                 } else if let Some(job) = &self.job {
                     // Closing an outbound session must not take this device
                     // offline for future incoming connections.
-                    job.control.stop();
+                    // Give the authenticated peer its normal close/ACK path.
+                    // The global Stop remains an immediate emergency abort.
+                    if job.control.send_remote(DesktopMessage::Close) {
+                        self.remote_close_at = Some(Instant::now());
+                        self.status = "Disconnecting remote desktop…".into();
+                    } else {
+                        job.control.stop();
+                    }
                 }
             }
             if ui
@@ -1382,6 +1399,13 @@ impl App {
                 {
                     control.set_clipboard_enabled(enabled);
                 }
+            }
+        });
+        // Changing digit counts/congestion labels must not move the video and
+        // the remote click target vertically. Small windows can pan this row.
+        egui::ScrollArea::horizontal().id_salt("remote-statistics")
+            .max_height(24.0).show(ui, |ui| { ui.horizontal(|ui| {
+            if let Some(control) = self.active_remote_control() {
                 let (frames, bytes, rtt) = control.statistics();
                 let elapsed = self.fps_sample.0.elapsed().as_secs_f64();
                 if elapsed >= 1.0 {
@@ -1418,7 +1442,7 @@ impl App {
                     ui.label(format!("RTT {:.1} ms", rtt as f64 / 1000.0));
                 }
             }
-        });
+        }); });
         if self.remote_frame.is_some() && !self.remote_source_listener {
             ui.horizontal_wrapped(|ui| {
                 let mut profile = self.video_profile;
@@ -1617,7 +1641,22 @@ impl App {
                     }
                 }
                 let focused = response.has_focus();
-                if focused {
+                let pasting = focused
+                    && ui.ctx().input(|input| {
+                        input
+                            .events
+                            .iter()
+                            .any(|event| matches!(event, egui::Event::Paste(_)))
+                    });
+                if pasting {
+                    // Ctrl+V is consumed locally by egui as Paste. Do not also
+                    // paste unrelated remote clipboard contents or hold Ctrl
+                    // while injecting the explicit Unicode payload.
+                    let _ = self.send_remote(Input::ReleaseAll);
+                    self.remote_buttons = [false; 3];
+                    self.remote_modifiers = [false; 3];
+                }
+                if focused && !pasting {
                     let modifiers = ui.ctx().input(|input| {
                         [
                             input.modifiers.ctrl,
@@ -1661,34 +1700,45 @@ impl App {
                 if focused {
                     let events = ui.ctx().input(|input| input.events.clone());
                     for event in events {
-                        match event {
-                            egui::Event::Text(text) if !text.is_empty() => {
-                                self.send_remote(Input::Text(text));
-                            }
-                            egui::Event::Key {
-                                key,
-                                pressed,
-                                modifiers,
-                                ..
-                            } => {
-                                if let Some(key) = virtual_key(key) {
-                                    let text_key = (0x30..=0x5A).contains(&key)
-                                        || key == 0x20
-                                        || (0xBA..=0xE2).contains(&key);
-                                    if !text_key
-                                        || modifiers.ctrl
-                                        || modifiers.alt
-                                        || modifiers.command
-                                        || modifiers.mac_cmd
-                                    {
-                                        self.send_remote(Input::Key {
-                                            virtual_key: key,
-                                            down: pressed,
-                                        });
+                        if let Some(result) = remote_input::text_input(&event) {
+                            match result {
+                                Ok(packets) => {
+                                    for packet in packets {
+                                        if !self.send_remote(packet) {
+                                            break;
+                                        }
                                     }
                                 }
+                                Err(error) => self.notice = Some(error.into()),
                             }
-                            _ => {}
+                            continue;
+                        }
+                        if let egui::Event::Key {
+                            key,
+                            pressed,
+                            modifiers,
+                            ..
+                        } = event
+                        {
+                            if pasting && key == egui::Key::V {
+                                continue;
+                            }
+                            if let Some(key) = virtual_key(key) {
+                                let text_key = (0x30..=0x5A).contains(&key)
+                                    || key == 0x20
+                                    || (0xBA..=0xE2).contains(&key);
+                                if !text_key
+                                    || modifiers.ctrl
+                                    || modifiers.alt
+                                    || modifiers.command
+                                    || modifiers.mac_cmd
+                                {
+                                    self.send_remote(Input::Key {
+                                        virtual_key: key,
+                                        down: pressed,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
@@ -2015,6 +2065,15 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         self.poll();
+        if self
+            .remote_close_at
+            .is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
+        {
+            if let Some(job) = &self.job {
+                job.control.stop();
+            }
+            self.remote_close_at = None;
+        }
         if let Some(receiver) = &self.update_check {
             ctx.request_repaint_after(Duration::from_millis(100));
             match receiver.try_recv() {

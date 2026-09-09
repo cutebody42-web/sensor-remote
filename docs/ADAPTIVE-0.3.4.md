@@ -61,10 +61,32 @@ physical presentation are explicitly not measured by this console benchmark.
 
 ## Acceptance status
 
-Real desktop capture on this laptop currently returns HRESULT 0x80070005 and
-the Windows UI tool cannot activate SENSOR (black capture). No protection is
-bypassed; owner-visible desktop availability is required for GUI acceptance.
-Cross-computer and current-head CI results are recorded separately after runs.
+On September 9, real DXGI capture became available on the owner's unlocked
+Windows 11 laptop. The actual 1920x1080 serial capture/encode/decode benchmark
+measured 9.20fps, 2.043Mbps and 9.25% process CPU across 15.006 seconds. Capture,
+preparation, encode and decode averaged 19.729/21.341/16.280/44.434ms per frame.
+This combines both endpoints serially under uncontrolled machine load, not
+remote presentation or proof of a hardware ceiling; 1080p60 is NOT verified.
+
+[Native two-computer run 34319516493](https://github.com/cutebody42-web/sensor-remote/actions/runs/34319516493)
+passed with real mouse click, Unicode, End key, wheel and clean close. It received
+291 changing frames from a 1024x768 cloud desktop, maximum sampled RTT274.918ms
+and close223ms. This used the native worker viewer, not the installed GUI.
+[Windows and Ubuntu CI at 0ef6e9e](https://github.com/cutebody42-web/sensor-remote/actions/runs/34320250004)
+passed. FPS recovery now requires five healthy windows and quantized tiers to
+avoid recreating the encoder for small CPU timing variations.
+
+The installed GUI then connected to a separate cloud PC in run34347519018.
+Actual video, mouse click, character-key entry and wheel were observed, with
+roughly12-23 sampled UI fps and239-320ms sampled RTT. The full gate FAILED:
+bulk text was not delivered and the host's bounded deadline expired before a
+verified clean disconnect. No timeout or fixture acknowledgement was weakened.
+The GUI follow-up handles explicit egui Paste as bounded Unicode keyboard
+input, without reading/synchronizing clipboard contents or also forwarding
+Ctrl+V. It keeps statistics in a fixed-height row so changing digits do not
+move the remote click target. Disconnect now requests authenticated graceful
+close with a two-second fallback abort; global Stop remains immediate.
+These follow-up changes still require a fresh installed-GUI gate.
 Windows 7 is **unsupported**, with a separate capability-probe architecture and
 remaining blockers in [legacy audit](../legacy/README.md). GitHub Windows Server
 runners do not prove Windows10 compatibility. No Win7/Win10 VM is available in

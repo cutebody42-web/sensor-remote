@@ -10,8 +10,8 @@ services:
       - key: SENSOR_MODE
         value: RENDER_TEST
       - key: RELAY_MAX_BITRATE
-        value: "2000000"
+        value: "20000000"
       - key: RELAY_MAX_FPS
-        value: "15"
+        value: "60"
       - key: RELAY_MAX_RESOLUTION
-        value: 1280x720
+        value: 1920x1080

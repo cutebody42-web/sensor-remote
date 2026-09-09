@@ -2,6 +2,29 @@
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use sensor_media::{Input, MouseButton};
 
+/// Explicit user text/paste into the focused viewport is keyboard input, not
+/// background clipboard synchronization. Never read the local clipboard here.
+/// Keep each authenticated packet within Input::Text's 1024-byte bound.
+pub fn text_input(event: &egui::Event) -> Option<Result<Vec<Input>, &'static str>> {
+    let (egui::Event::Text(text) | egui::Event::Paste(text)) = event else {
+        return None;
+    };
+    if text.len() > sensor_media::MAX_CLIPBOARD_BYTES || text.chars().any(char::is_control) {
+        return Some(Err("Remote text input accepts up to 64 KiB of printable text; use Enter/Tab keys separately."));
+    }
+    let mut packets = Vec::new();
+    let mut remaining = text.as_str();
+    while !remaining.is_empty() {
+        let mut end = remaining.len().min(1024);
+        while !remaining.is_char_boundary(end) {
+            end -= 1;
+        }
+        packets.push(Input::Text(remaining[..end].into()));
+        remaining = &remaining[end..];
+    }
+    Some(Ok(packets))
+}
+
 pub fn pointer_position(pos: Pos2, rect: Rect, dimensions: [u32; 2]) -> (u32, u32) {
     let normalized = (pos - rect.min) / rect.size();
     let axis = |value: f32, size: u32| {
@@ -70,6 +93,38 @@ pub fn wheel_delta(unit: egui::MouseWheelUnit, delta: Vec2) -> [i32; 2] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_paste_and_typed_unicode_produce_identical_bounded_text() {
+        let text = "SENSOR QA مرحبا 123".repeat(100);
+        for event in [
+            egui::Event::Text(text.clone()),
+            egui::Event::Paste(text.clone()),
+        ] {
+            let packets = text_input(&event).unwrap().unwrap();
+            let mut restored = String::new();
+            for packet in packets {
+                let Input::Text(chunk) = packet else {
+                    panic!("text only")
+                };
+                assert!(chunk.len() <= 1024 && !chunk.is_empty());
+                restored.push_str(&chunk);
+            }
+            assert_eq!(restored, text);
+        }
+        assert!(text_input(&egui::Event::Paste("x".repeat(65537)))
+            .unwrap()
+            .is_err());
+        assert!(text_input(&egui::Event::Paste("line\nnext".into()))
+            .unwrap()
+            .is_err());
+        assert!(text_input(&egui::Event::Paste("\0".into()))
+            .unwrap()
+            .is_err());
+        assert!(text_input(&egui::Event::Text(String::new()))
+            .unwrap()
+            .unwrap()
+            .is_empty());
+    }
     fn click(pos: Pos2, pressed: bool) -> egui::Event {
         egui::Event::PointerButton {
             pos,
