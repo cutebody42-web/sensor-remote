@@ -16,6 +16,36 @@ use windows::{
     },
 };
 
+/// RtlGetVersion is independent of application compatibility manifest shims.
+/// This detector does not imply that the modern GUI/toolchain supports Win7.
+pub fn os_version() -> Result<(u32, u32, u32), DesktopError> {
+    #[repr(C)]
+    struct Version {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform: u32,
+        service_pack: [u16; 128],
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetVersion(version: *mut Version) -> i32;
+    }
+    let mut version = Version {
+        size: std::mem::size_of::<Version>() as u32,
+        major: 0,
+        minor: 0,
+        build: 0,
+        platform: 0,
+        service_pack: [0; 128],
+    };
+    if unsafe { RtlGetVersion(&mut version) } != 0 {
+        return Err(DesktopError::Monitor);
+    }
+    Ok((version.major, version.minor, version.build))
+}
+
 #[derive(Debug, Error)]
 pub enum DesktopError {
     #[error("Windows desktop: {0}")]
@@ -34,6 +64,7 @@ pub enum DesktopError {
 
 /// Opening READOBJECTS never switches, unlocks or attaches to another desktop.
 pub fn interactive_desktop() -> Result<(), DesktopError> {
+    let version = os_version()?;
     unsafe {
         // The Default desktop can remain accessible behind LockApp. Check the
         // current Windows session too, without switching desktops or unlocking.
@@ -51,7 +82,13 @@ pub fn interactive_desktop() -> Result<(), DesktopError> {
             let info = std::ptr::read_unaligned(buffer.0.cast::<WTSINFOEXW>());
             info.Level == 1
                 && info.Data.WTSInfoExLevel1.SessionState == WTSActive
-                && info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_UNLOCK as i32
+                && info.Data.WTSInfoExLevel1.SessionFlags
+                    == if (version.0, version.1) == (6, 1) {
+                        // Documented Windows 7 / Server 2008 R2 reversed flags.
+                        WTS_SESSIONSTATE_LOCK as i32
+                    } else {
+                        WTS_SESSIONSTATE_UNLOCK as i32
+                    }
         } else {
             false
         };
@@ -134,7 +171,7 @@ pub fn displays(consent: &Consent) -> Result<Vec<Display>, DesktopError> {
         .collect())
 }
 
-pub struct Capture {
+struct DxgiCapture {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     duplicate: IDXGIOutputDuplication,
@@ -158,7 +195,7 @@ impl Drop for Mapping<'_> {
         }
     }
 }
-impl Capture {
+impl DxgiCapture {
     pub fn new(index: u32, consent: &Consent) -> Result<Self, DesktopError> {
         consent.require(Permission::ViewDesktop)?;
         interactive_desktop()?;
@@ -294,6 +331,191 @@ impl Capture {
                 && x < self.display.width as i32
                 && y < self.display.height as i32,
         ))
+    }
+}
+
+enum Backend {
+    Modern(DxgiCapture),
+    Legacy(LegacyCapture),
+}
+
+/// Session code owns this interface, never platform-specific GDI/DXGI handles.
+/// DXGI failures on modern Windows are NOT silently bypassed by GDI.
+pub struct Capture {
+    backend: Backend,
+    pub display: Display,
+    pub rotation: u32,
+}
+impl Capture {
+    pub fn new(index: u32, consent: &Consent) -> Result<Self, DesktopError> {
+        let (major, minor, _) = os_version()?;
+        if (major, minor) == (6, 1) {
+            return Self::legacy(index, consent);
+        }
+        let capture = DxgiCapture::new(index, consent)?;
+        Ok(Self {
+            display: capture.display.clone(),
+            rotation: capture.rotation,
+            backend: Backend::Modern(capture),
+        })
+    }
+    /// Explicit diagnostics/legacy-build entrypoint; never an access-denied retry.
+    pub fn legacy(index: u32, consent: &Consent) -> Result<Self, DesktopError> {
+        let capture = LegacyCapture::new(index, consent)?;
+        Ok(Self {
+            display: capture.display.clone(),
+            rotation: 0,
+            backend: Backend::Legacy(capture),
+        })
+    }
+    pub fn backend_name(&self) -> &'static str {
+        match self.backend {
+            Backend::Modern(_) => "DXGI Desktop Duplication",
+            Backend::Legacy(_) => "GDI legacy capture",
+        }
+    }
+    pub fn next(&mut self, consent: &Consent) -> Result<Option<BgraFrame>, DesktopError> {
+        match &mut self.backend {
+            Backend::Modern(c) => c.next(consent),
+            Backend::Legacy(c) => c.next(consent),
+        }
+    }
+    pub fn cursor(&self) -> Result<(i32, i32, bool), DesktopError> {
+        match &self.backend {
+            Backend::Modern(c) => c.cursor(),
+            Backend::Legacy(c) => c.cursor(),
+        }
+    }
+}
+
+use windows::Win32::Graphics::Gdi::*;
+struct LegacyCapture {
+    display: Display,
+    screen: HDC,
+    memory: HDC,
+    bitmap: HBITMAP,
+    previous: HGDIOBJ,
+    bits: *mut std::ffi::c_void,
+}
+impl LegacyCapture {
+    fn new(index: u32, consent: &Consent) -> Result<Self, DesktopError> {
+        consent.require(Permission::ViewDesktop)?;
+        interactive_desktop()?;
+        let display = displays(consent)?
+            .into_iter()
+            .find(|d| d.index == index)
+            .ok_or(DesktopError::Monitor)?;
+        let mut capture = Self {
+            display,
+            screen: HDC::default(),
+            memory: HDC::default(),
+            bitmap: HBITMAP::default(),
+            previous: HGDIOBJ::default(),
+            bits: std::ptr::null_mut(),
+        };
+        unsafe {
+            capture.screen = GetDC(None);
+            if capture.screen.is_invalid() {
+                return Err(DesktopError::Monitor);
+            }
+            capture.memory = CreateCompatibleDC(Some(capture.screen));
+            if capture.memory.is_invalid() {
+                return Err(DesktopError::Monitor);
+            }
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: capture.display.width as i32,
+                    biHeight: -(capture.display.height as i32),
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            capture.bitmap = CreateDIBSection(
+                Some(capture.screen),
+                &info,
+                DIB_RGB_COLORS,
+                &mut capture.bits,
+                None,
+                0,
+            )?;
+            if capture.bits.is_null() {
+                return Err(DesktopError::Monitor);
+            }
+            capture.previous = SelectObject(capture.memory, HGDIOBJ(capture.bitmap.0));
+            if capture.previous.is_invalid() {
+                return Err(DesktopError::Monitor);
+            }
+        }
+        Ok(capture)
+    }
+    fn next(&mut self, consent: &Consent) -> Result<Option<BgraFrame>, DesktopError> {
+        consent.require(Permission::ViewDesktop)?;
+        interactive_desktop()?;
+        let count = pixels(self.display.width, self.display.height)?;
+        let bytes = unsafe {
+            BitBlt(
+                self.memory,
+                0,
+                0,
+                self.display.width as i32,
+                self.display.height as i32,
+                Some(self.screen),
+                self.display.left,
+                self.display.top,
+                SRCCOPY | CAPTUREBLT,
+            )?;
+            GdiFlush().ok()?;
+            std::slice::from_raw_parts(self.bits.cast::<u8>(), count * 4).to_vec()
+        };
+        interactive_desktop()?;
+        Ok(Some(BgraFrame {
+            width: self.display.width,
+            height: self.display.height,
+            bytes,
+        }))
+    }
+    fn cursor(&self) -> Result<(i32, i32, bool), DesktopError> {
+        interactive_desktop()?;
+        let mut info = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            GetCursorInfo(&mut info)?;
+        }
+        let x = info.ptScreenPos.x - self.display.left;
+        let y = info.ptScreenPos.y - self.display.top;
+        Ok((
+            x,
+            y,
+            info.flags == CURSOR_SHOWING
+                && x >= 0
+                && y >= 0
+                && x < self.display.width as i32
+                && y < self.display.height as i32,
+        ))
+    }
+}
+impl Drop for LegacyCapture {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.previous.is_invalid() && !self.memory.is_invalid() {
+                SelectObject(self.memory, self.previous);
+            }
+            if !self.bitmap.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(self.bitmap.0));
+            }
+            if !self.memory.is_invalid() {
+                let _ = DeleteDC(self.memory);
+            }
+            if !self.screen.is_invalid() {
+                ReleaseDC(None, self.screen);
+            }
+        }
     }
 }
 

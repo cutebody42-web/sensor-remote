@@ -1,5 +1,5 @@
 //! Windows Media Foundation H.264 transforms. No screenshot/JPEG codec fallback.
-use sensor_media::{nv12_to_rgba, pixels, DecodedFrame, EncodedFrame, MAX_ENCODED_FRAME};
+use sensor_media::{nv12_to_rgba_padded, pixels, DecodedFrame, EncodedFrame, MAX_ENCODED_FRAME};
 use std::{
     marker::PhantomData,
     mem::ManuallyDrop,
@@ -38,6 +38,29 @@ pub enum CodecError {
 
 struct Runtime {
     _thread: PhantomData<Rc<()>>,
+}
+
+/// Read-only cumulative CPU time for opt-in pipeline diagnostics.
+pub fn process_cpu_seconds() -> Result<f64, windows::core::Error> {
+    use windows::Win32::{
+        Foundation::FILETIME,
+        System::Threading::{GetCurrentProcess, GetProcessTimes},
+    };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )?;
+    }
+    let ticks = |t: FILETIME| ((t.dwHighDateTime as u64) << 32) | t.dwLowDateTime as u64;
+    Ok((ticks(kernel) + ticks(user)) as f64 / 10_000_000.)
 }
 impl Runtime {
     fn new() -> Result<Self, CodecError> {
@@ -385,6 +408,14 @@ impl H264Encoder {
                         let transform: IMFTransform = activation.ActivateObject()?;
                         let mut engine = Engine::new(transform)?;
                         if let Ok(codec) = engine.transform.cast::<ICodecAPI>() {
+                            let _ = codec.SetValue(
+                                &CODECAPI_AVEncCommonRateControlMode,
+                                &VARIANT::from(eAVEncCommonRateControlMode_CBR.0 as u32),
+                            );
+                            let _ = codec.SetValue(
+                                &CODECAPI_AVEncCommonMeanBitRate,
+                                &VARIANT::from(bitrate),
+                            );
                             let _ =
                                 codec.SetValue(&CODECAPI_AVLowLatencyMode, &VARIANT::from(true));
                             let _ = codec.SetValue(
@@ -434,6 +465,20 @@ impl H264Encoder {
             }
         }
         Err(CodecError::Unavailable)
+    }
+    /// Drivers that cannot change rate dynamically trigger a new encoder
+    /// generation in the caller; silently ignoring a rate change is forbidden.
+    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), CodecError> {
+        if !(100_000..=50_000_000).contains(&bitrate) {
+            return Err(CodecError::Invalid);
+        }
+        unsafe {
+            self.engine
+                .transform
+                .cast::<ICodecAPI>()?
+                .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &VARIANT::from(bitrate))?;
+        }
+        Ok(())
     }
     pub fn encode(
         &mut self,
@@ -528,6 +573,47 @@ pub struct H264Decoder {
     fps: u32,
     _runtime: Runtime,
 }
+
+/// Validate codec-declared visible aperture before accepting macroblock padding.
+fn decoder_layout(media: &IMFMediaType, width: u32, height: u32) -> Result<(u32, u32), CodecError> {
+    let size = unsafe { media.GetUINT64(&MF_MT_FRAME_SIZE)? };
+    let (storage_w, storage_h) = ((size >> 32) as u32, size as u32);
+    pixels(storage_w, storage_h)?;
+    if (storage_w, storage_h) == (width, height) {
+        return Ok((storage_w, storage_h));
+    }
+    if storage_w >= width
+        && storage_h >= height
+        && storage_w <= width.div_ceil(16) * 16
+        && storage_h <= height.div_ceil(16) * 16
+    {
+        for key in [MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_GEOMETRIC_APERTURE] {
+            let mut blob = [0u8; std::mem::size_of::<MFVideoArea>()];
+            let mut length = 0;
+            if unsafe { media.GetBlob(&key, &mut blob, Some(&mut length)) }.is_ok()
+                && length as usize == blob.len()
+            {
+                let aperture =
+                    unsafe { std::ptr::read_unaligned(blob.as_ptr().cast::<MFVideoArea>()) };
+                if aperture.OffsetX.value == 0
+                    && aperture.OffsetX.fract == 0
+                    && aperture.OffsetY.value == 0
+                    && aperture.OffsetY.fract == 0
+                    && aperture.Area.cx == width as i32
+                    && aperture.Area.cy == height as i32
+                {
+                    return Ok((storage_w, storage_h));
+                }
+            }
+        }
+    }
+    Err(CodecError::OutputDimensions {
+        expected_width: width,
+        expected_height: height,
+        actual_width: storage_w,
+        actual_height: storage_h,
+    })
+}
 impl H264Decoder {
     pub fn new(width: u32, height: u32, fps: u32) -> Result<Self, CodecError> {
         pixels(width, height)?;
@@ -594,15 +680,7 @@ impl H264Decoder {
                                 Err(_) => break,
                             };
                             if media.GetGUID(&MF_MT_SUBTYPE)? == MFVideoFormat_NV12 {
-                                let size = media.GetUINT64(&MF_MT_FRAME_SIZE)?;
-                                if (size >> 32) as u32 != self.width || size as u32 != self.height {
-                                    return Err(CodecError::OutputDimensions {
-                                        expected_width: self.width,
-                                        expected_height: self.height,
-                                        actual_width: (size >> 32) as u32,
-                                        actual_height: size as u32,
-                                    });
-                                }
+                                decoder_layout(&media, self.width, self.height)?;
                                 selected = Some(media);
                                 break;
                             }
@@ -623,19 +701,17 @@ impl H264Decoder {
                 break;
             };
             let media = unsafe { self.engine.transform.GetOutputCurrentType(0)? };
-            let size = unsafe { media.GetUINT64(&MF_MT_FRAME_SIZE)? };
-            if (size >> 32) as u32 != self.width || size as u32 != self.height {
-                return Err(CodecError::OutputDimensions {
-                    expected_width: self.width,
-                    expected_height: self.height,
-                    actual_width: (size >> 32) as u32,
-                    actual_height: size as u32,
-                });
-            }
+            let (storage_w, storage_h) = decoder_layout(&media, self.width, self.height)?;
             let stride =
-                unsafe { media.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(self.width) as usize;
+                unsafe { media.GetUINT32(&MF_MT_DEFAULT_STRIDE) }.unwrap_or(storage_w) as usize;
             let bytes = sample_bytes(&sample, sensor_media::MAX_PIXELS * 4)?;
-            output.push(nv12_to_rgba(&bytes, self.width, self.height, stride)?);
+            output.push(nv12_to_rgba_padded(
+                &bytes,
+                self.width,
+                self.height,
+                stride,
+                storage_h,
+            )?);
         }
         Ok(output)
     }
@@ -644,6 +720,34 @@ impl H264Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn real_1080_h264_round_trip_preserves_visible_bottom_row() {
+        let raw = sensor_media::bgra_to_nv12(&sensor_media::BgraFrame {
+            width: 1920,
+            height: 1080,
+            bytes: [20, 80, 200, 255].repeat(1920 * 1080),
+        })
+        .unwrap();
+        let mut encoder = H264Encoder::new(1920, 1080, 30, 8_000_000, false).unwrap();
+        let mut packets = encoder.encode(&raw, 0).unwrap();
+        packets.extend(encoder.encode(&raw, 333333).unwrap());
+        packets.extend(encoder.drain().unwrap());
+        let mut decoder = H264Decoder::new(1920, 1080, 30).unwrap();
+        let mut frames = Vec::new();
+        for packet in packets {
+            frames.extend(decoder.decode(&packet).unwrap());
+        }
+        assert!(!frames.is_empty());
+        for frame in frames {
+            assert_eq!((frame.width, frame.height), (1920, 1080));
+            for (actual, expected) in frame.rgba[(1079 * 1920 + 1919) * 4..]
+                .iter()
+                .zip([200, 80, 20, 255])
+            {
+                assert!((*actual as i32 - expected).abs() < 12);
+            }
+        }
+    }
     #[test]
     fn actual_windows_h264_encode_decode_preserves_test_colors() {
         let (width, height) = (256, 144);

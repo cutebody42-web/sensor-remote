@@ -7,6 +7,10 @@ transport**. The shipped package is configured for the verified Railway
 rendezvous service; this is still a development release without Authenticode,
 not a complete AnyDesk-equivalent product.
 
+Current engineering work: [adaptive 0.3.4](docs/ADAPTIVE-0.3.4.md).
+Both endpoints must use the matching adaptive build. [Windows 7 is not supported](legacy/README.md);
+the separate legacy capability probe is not a released remote-access app.
+
 ## Windows app, not a website
 
 `SENSOR-Remote.exe` is a native Rust/egui Windows application using wgpu's

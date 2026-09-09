@@ -1,4 +1,4 @@
-param([long]$RunId = 34153021049, [string]$GuiViewerPublic)
+param([long]$RunId = 34153021049, [string]$GuiViewerPublic, [switch]$NativeViewer)
 $ErrorActionPreference = 'Stop'
 $sensorRepo = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $sensorViewerRoot = Join-Path (Split-Path -Parent $sensorRepo) 'native-cross-video-0.3.2\viewer'
@@ -53,12 +53,16 @@ Expand-Archive -LiteralPath $sensorZip -DestinationPath $sensorPublicRoot
 $sensorPublic = @(Get-ChildItem -LiteralPath $sensorPublicRoot -Recurse -File -Filter 'sensor-input-public.json')
 $sensorTarget = @(Get-ChildItem -LiteralPath $sensorPublicRoot -Recurse -File -Filter 'target-public.json')
 if ($sensorPublic.Count -ne 1 -or $sensorTarget.Count -ne 1) { throw 'Missing or ambiguous public fixture metadata' }
-if ($GuiViewerPublic) {
+if ($GuiViewerPublic -and !$NativeViewer) {
     Write-Output 'GUI_TARGET_READY. Connect through the installed native app using this public metadata:'
     Get-Content -LiteralPath $sensorPublic[0].FullName
     Get-Content -LiteralPath $sensorTarget[0].FullName
     Write-Output 'The gate requires native mouse, exact synthetic text SENSOR QA مرحبا 123, wheel, then disconnect.'
 } else {
+    if ($NativeViewer) {
+        # Public metadata came from the explicitly prepared native viewer.
+        $sensorViewerRoot = Split-Path -Parent $GuiViewerPublic
+    }
     Write-Output 'Cloud target prepared. Sending real native mouse, keyboard and wheel through SENSOR.'
     & $sensorExe view-control $sensorViewerRoot $sensorPublic[0].FullName $sensorTarget[0].FullName 2>&1 | Tee-Object -FilePath (Join-Path $sensorEvidence 'laptop-viewer.log')
     if ($LASTEXITCODE) { throw 'Laptop native viewer/input failed' }

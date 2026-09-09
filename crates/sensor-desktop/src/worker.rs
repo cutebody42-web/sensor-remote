@@ -113,8 +113,19 @@ pub struct Control {
     rtt_micros: Arc<AtomicU64>,
     captured_frames: Arc<AtomicU64>,
     encoded_frames: Arc<AtomicU64>,
+    telemetry: Arc<Mutex<Option<sensor_media::adaptive::Telemetry>>>,
+    presented_frames: Arc<AtomicU64>,
 }
 impl Control {
+    pub fn telemetry(&self) -> Option<sensor_media::adaptive::Telemetry> {
+        self.telemetry.lock().ok().and_then(|value| value.clone())
+    }
+    pub fn mark_presented(&self) {
+        self.presented_frames.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn presented_frames(&self) -> u64 {
+        self.presented_frames.load(Ordering::Relaxed)
+    }
     pub fn set_clipboard_enabled(&self, enabled: bool) {
         self.clipboard_enabled
             .store(enabled && self.clipboard_allowed(), Ordering::SeqCst);
@@ -641,7 +652,14 @@ fn execute(
             _ => return Err("Invalid chat response.".into()),
         }
     }
-    let _ = connection.send(&Message::Close);
+    // Cancellation is a transport abort, not a graceful peer close. In
+    // particular, wait_reply can observe cancelled before abort has acquired
+    // the socket mutex. Do not race that shutdown by writing a success Close.
+    if !control.was_stopped_locally() && !control.is_stopped() {
+        connection
+            .send(&Message::Close)
+            .map_err(|e| e.to_string())?;
+    }
     Ok("Chat closed.".into())
 }
 
@@ -653,6 +671,12 @@ enum HostCommand {
     Close,
     Failed(String),
     Clipboard(String),
+    Ack {
+        generation: u64,
+        sequence: u64,
+        decode_us: u64,
+        rtt_us: u64,
+    },
 }
 
 #[cfg(windows)]
@@ -699,8 +723,13 @@ fn send_video_packets(
     packets: Vec<sensor_media::EncodedFrame>,
     generation: u64,
     control: &Control,
+    flight: &mut sensor_media::adaptive::FlightWindow,
+    telemetry: &mut sensor_media::adaptive::Telemetry,
 ) -> Result<(), sensor_client::EndpointError> {
     for packet in packets {
+        flight.encoded(packet.timestamp_100ns as u64, packet.bytes.len());
+        telemetry.bytes += packet.bytes.len() as u64;
+        let send_started = Instant::now();
         let total = u32::try_from(packet.bytes.len()).map_err(|_| {
             sensor_client::EndpointError::Desktop("Encoded frame is too large.".into())
         })?;
@@ -709,6 +738,9 @@ fn send_video_packets(
             .chunks(sensor_media::VIDEO_FRAGMENT)
             .enumerate()
         {
+            if send_started.elapsed() > Duration::from_millis(500) {
+                return Err(sensor_client::EndpointError::Desktop("Video writer exceeded its interactive deadline; session closed to prevent stale input.".into()));
+            }
             let offset = index
                 .checked_mul(sensor_media::VIDEO_FRAGMENT)
                 .and_then(|value| u32::try_from(value).ok())
@@ -729,6 +761,8 @@ fn send_video_packets(
             )?;
         }
         control.encoded_frames.fetch_add(1, Ordering::Relaxed);
+        telemetry.encoded += 1;
+        telemetry.send_us += send_started.elapsed().as_micros() as u64;
     }
     Ok(())
 }
@@ -745,6 +779,7 @@ fn spawn_host_reader(
     thread::spawn(move || {
         let commands = HostCommands(commands, control.clone());
         let mut injector = input::Injector::default();
+        let mut injected_generation = 0;
         let mut local_consent = Consent::pending(permissions);
         if local_consent.accept(permissions).is_err() {
             let _ = commands.send(HostCommand::Failed(
@@ -781,6 +816,10 @@ fn spawn_host_reader(
                     };
                     if target.generation == 0 || input_generation != target.generation {
                         continue;
+                    }
+                    if injected_generation != target.generation {
+                        let _ = injector.release();
+                        injected_generation = target.generation;
                     }
                     // Keep the target locked through injection: generation and
                     // coordinates must always describe the same selected display.
@@ -834,6 +873,24 @@ fn spawn_host_reader(
                         break;
                     }
                 }
+                Message::Desktop(DesktopMessage::FrameAck {
+                    generation,
+                    sequence,
+                    decode_us,
+                    rtt_us,
+                }) => {
+                    if commands
+                        .send(HostCommand::Ack {
+                            generation,
+                            sequence,
+                            decode_us,
+                            rtt_us,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Message::Desktop(DesktopMessage::ClipboardText(text)) => {
                     if local_consent
                         .require(sensor_session::permissions::Permission::ClipboardText)
@@ -878,7 +935,7 @@ fn host_desktop(
     connection: &mut SecureConnection,
     consent: &Consent,
     control: &Control,
-    internet: bool,
+    _internet: bool,
 ) -> Result<(), sensor_client::EndpointError> {
     // Every return path must abort the blocking reader and release held input.
     let _stop = DesktopStop(control.clone());
@@ -894,6 +951,7 @@ fn host_desktop(
     let selected = 0_u32;
     let mut generation = 1_u64;
     let (reader, mut writer) = connection.split()?;
+    writer.set_timeout(Duration::from_millis(250))?;
     desktop_message(&mut writer, DesktopMessage::Displays(displays.clone()))?;
 
     let active = Arc::new(Mutex::new(InputTarget {
@@ -910,8 +968,16 @@ fn host_desktop(
         permissions,
     );
 
-    let mut profile = sensor_media::VideoProfile::Balanced;
-    let setup = |index: u32, generation: u64, profile: sensor_media::VideoProfile| {
+    let ceiling = std::env::var("SENSOR_VIDEO_MAX_BITRATE")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(sensor_media::adaptive::DEFAULT_MAX_BITRATE);
+    let mut adaptive = sensor_media::adaptive::Adaptive::new(ceiling);
+    let mut prefer_hardware = true;
+    let setup = |index: u32,
+                 generation: u64,
+                 adaptive: &sensor_media::adaptive::Adaptive,
+                 prefer_hardware| {
         let capture = desktop::Capture::new(index, consent).map_err(|error| {
             sensor_client::EndpointError::Desktop(format!("Capture monitor {index}: {error}"))
         })?;
@@ -935,12 +1001,16 @@ fn host_desktop(
         } else {
             raw_height
         };
-        let (width, height) = profile
-            .dimensions(output_width, output_height)
+        let target = adaptive
+            .target(output_width, output_height)
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
-        let fps = profile.fps();
-        let bitrate = if internet { 1_500_000 } else { 4_000_000 };
-        let encoder = codec::H264Encoder::new(width, height, fps, bitrate, true)
+        let sensor_media::adaptive::Target {
+            width,
+            height,
+            fps,
+            bitrate,
+        } = target;
+        let encoder = codec::H264Encoder::new(width, height, fps, bitrate, prefer_hardware)
             .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
         let format = VideoFormat {
             generation,
@@ -958,7 +1028,8 @@ fn host_desktop(
         Ok::<_, sensor_client::EndpointError>((capture, encoder, format))
     };
 
-    let (initial_capture, initial_encoder, mut format) = setup(selected, generation, profile)?;
+    let (initial_capture, initial_encoder, mut format) =
+        setup(selected, generation, &adaptive, prefer_hardware)?;
     let mut capture = Some(initial_capture);
     let mut encoder = Some(initial_encoder);
     desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
@@ -968,20 +1039,17 @@ fn host_desktop(
     let capture_started = Instant::now();
     let mut clipboard = sensor_windows::clipboard::TextClipboard::default();
     let mut clipboard_at = Instant::now();
+    let mut flight = sensor_media::adaptive::FlightWindow::default();
+    let mut telemetry = sensor_media::adaptive::Telemetry::default();
+    let mut feedback = sensor_media::adaptive::Feedback::default();
+    let mut measured_at = Instant::now();
+    let mut previous = telemetry.clone();
+    let mut reconfigure = None;
     let result = (|| loop {
         if control.is_stopped() {
             return Ok(());
         }
-        // Hardware MFT output arrives asynchronously. Poll even on a static
-        // desktop, otherwise the first frame can remain buffered indefinitely.
-        let pending = encoder
-            .as_mut()
-            .ok_or_else(|| {
-                sensor_client::EndpointError::Desktop("Encoder is not configured.".into())
-            })?
-            .available()
-            .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
-        send_video_packets(&mut writer, pending, generation, control)?;
+        // Drain input acknowledgements and control before any new video work.
         for _ in 0..64 {
             let Ok(command) = command_receiver.try_recv() else {
                 break;
@@ -991,7 +1059,7 @@ fn host_desktop(
                     let index = match command {
                         HostCommand::SelectDisplay(index) => index,
                         HostCommand::SelectVideoProfile(next) => {
-                            profile = next;
+                            adaptive.profile = next;
                             format.display.index
                         }
                         _ => unreachable!(),
@@ -1001,27 +1069,7 @@ fn host_desktop(
                             "Unknown monitor selected.".into(),
                         ));
                     }
-                    let next_generation = generation.saturating_add(1);
-                    // DXGI refuses a second duplication of the same output in
-                    // one process. Release the old capture before reopening it.
-                    drop(capture.take());
-                    drop(encoder.take());
-                    let (next_capture, next_encoder, next_format) =
-                        setup(index, next_generation, profile)?;
-                    generation = next_generation;
-                    capture = Some(next_capture);
-                    encoder = Some(next_encoder);
-                    format = next_format;
-                    desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
-                    let mut current = active.lock().map_err(|_| {
-                        sensor_client::EndpointError::Desktop(
-                            "Remote display state became unavailable.".into(),
-                        )
-                    })?;
-                    *current = InputTarget {
-                        generation,
-                        display: format.display.clone(),
-                    };
+                    reconfigure = Some(index);
                 }
                 HostCommand::Pong(value) => {
                     desktop_message(&mut writer, DesktopMessage::Pong(value))?;
@@ -1036,8 +1084,112 @@ fn host_desktop(
                 HostCommand::Clipboard(text) => {
                     let _ = clipboard.apply(&text, control.clipboard_enabled(), consent);
                 }
+                HostCommand::Ack {
+                    generation: ack_generation,
+                    sequence,
+                    decode_us,
+                    rtt_us,
+                } => {
+                    if ack_generation == generation {
+                        if let Some(delay) = flight
+                            .acknowledge(sequence, capture_started.elapsed().as_millis() as u64)
+                        {
+                            feedback.delivery_ms = feedback.delivery_ms.max(delay);
+                            feedback.decode_us = feedback.decode_us.max(decode_us.min(5_000_000));
+                            feedback.rtt_ms = rtt_us.min(10_000_000) / 1000;
+                            feedback.acknowledged += 1;
+                            telemetry.delivery_ms = delay;
+                        }
+                    }
+                }
             }
         }
+        let now_ms = capture_started.elapsed().as_millis() as u64;
+        if flight.oldest_ms(now_ms) > 5_000 {
+            return Err(sensor_client::EndpointError::Desktop(
+                "Video delivery stalled for 5 seconds; reconnect after checking the network."
+                    .into(),
+            ));
+        }
+        if measured_at.elapsed() >= Duration::from_secs(1) {
+            feedback.delivery_ms = feedback.delivery_ms.max(flight.oldest_ms(now_ms));
+            let captures = telemetry.captured.saturating_sub(previous.captured).max(1);
+            feedback.prepare_encode_us =
+                (telemetry.capture_us + telemetry.prepare_us + telemetry.encode_us)
+                    .saturating_sub(previous.capture_us + previous.prepare_us + previous.encode_us)
+                    / captures;
+            adaptive.observe(feedback);
+            let target = adaptive
+                .target(format.display.width, format.display.height)
+                .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?;
+            if (target.width, target.height, target.fps)
+                != (format.width, format.height, format.fps_limit)
+            {
+                reconfigure = Some(format.display.index);
+            } else if target.bitrate != format.bitrate {
+                if encoder
+                    .as_mut()
+                    .is_some_and(|value| value.set_bitrate(target.bitrate).is_ok())
+                {
+                    format.bitrate = target.bitrate;
+                } else {
+                    reconfigure = Some(format.display.index);
+                }
+            }
+            telemetry.elapsed_ms = now_ms;
+            telemetry.in_flight_bytes = flight.bytes() as u64;
+            telemetry.profile = adaptive.profile;
+            telemetry.congestion = adaptive.congested;
+            *control.telemetry.lock().map_err(|_| {
+                sensor_client::EndpointError::Desktop("Telemetry unavailable".into())
+            })? = Some(telemetry.clone());
+            desktop_message(&mut writer, DesktopMessage::Telemetry(telemetry.clone()))?;
+            previous = telemetry.clone();
+            feedback = sensor_media::adaptive::Feedback::default();
+            measured_at = Instant::now();
+        }
+        if let Some(index) = reconfigure.take() {
+            // Drop old reference chain and advertise a new generation before
+            // accepting input or transmitting output from the replacement MFT.
+            drop(capture.take());
+            drop(encoder.take());
+            generation += 1;
+            let (next_capture, next_encoder, next_format) =
+                setup(index, generation, &adaptive, prefer_hardware)?;
+            capture = Some(next_capture);
+            encoder = Some(next_encoder);
+            format = next_format;
+            flight = sensor_media::adaptive::FlightWindow::default();
+            desktop_message(&mut writer, DesktopMessage::Format(format.clone()))?;
+            *active.lock().map_err(|_| {
+                sensor_client::EndpointError::Desktop("Remote display unavailable".into())
+            })? = InputTarget {
+                generation,
+                display: format.display.clone(),
+            };
+        }
+        // Poll async hardware output even when the desktop is static.
+        let pending = match encoder.as_mut().expect("configured encoder").available() {
+            Ok(pending) => pending,
+            Err(_) if prefer_hardware && format.hardware => {
+                prefer_hardware = false;
+                reconfigure = Some(format.display.index);
+                continue;
+            }
+            Err(error) => return Err(sensor_client::EndpointError::Desktop(error.to_string())),
+        };
+        let send_at = Instant::now();
+        send_video_packets(
+            &mut writer,
+            pending,
+            generation,
+            control,
+            &mut flight,
+            &mut telemetry,
+        )?;
+        feedback.write_stall_ms = feedback
+            .write_stall_ms
+            .max(send_at.elapsed().as_millis() as u64);
         if clipboard_at.elapsed() >= Duration::from_millis(250) {
             if let Some(text) = clipboard.poll(control.clipboard_enabled(), consent) {
                 desktop_message(&mut writer, DesktopMessage::ClipboardText(text))?;
@@ -1051,11 +1203,24 @@ fn host_desktop(
             sensor_client::EndpointError::Desktop("Encoder is not configured.".into())
         })?;
         if last_frame.elapsed() >= Duration::from_secs_f64(1.0 / format.fps_limit as f64) {
+            let frame_started = Instant::now();
+            // Never drop encoded P-frames: skip capture before creating codec
+            // dependencies. Input is processed by its independent reader.
+            if !flight.can_submit(now_ms, adaptive.bitrate()) {
+                telemetry.skipped += 1;
+                feedback.saturated |= flight.oldest_ms(now_ms) >= 500;
+                last_frame = frame_started;
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
             match capture
                 .next(consent)
                 .map_err(|error| sensor_client::EndpointError::Desktop(error.to_string()))?
             {
                 Some(frame) => {
+                    telemetry.capture_us += frame_started.elapsed().as_micros() as u64;
+                    telemetry.captured += 1;
+                    let prepare_at = Instant::now();
                     control.captured_frames.fetch_add(1, Ordering::Relaxed);
                     let frame = sensor_media::rotate_scale_bgra(
                         frame,
@@ -1072,11 +1237,34 @@ fn host_desktop(
                         .as_micros()
                         .saturating_mul(10)
                         .min(i64::MAX as u128) as i64;
-                    let packets = encoder.encode(&nv12, timestamp).map_err(|error| {
-                        sensor_client::EndpointError::Desktop(error.to_string())
-                    })?;
-                    send_video_packets(&mut writer, packets, generation, control)?;
-                    last_frame = Instant::now();
+                    telemetry.prepare_us += prepare_at.elapsed().as_micros() as u64;
+                    let encode_at = Instant::now();
+                    flight.submit(timestamp as u64, now_ms);
+                    let packets = match encoder.encode(&nv12, timestamp) {
+                        Ok(packets) => packets,
+                        Err(_) if prefer_hardware && format.hardware => {
+                            prefer_hardware = false;
+                            reconfigure = Some(format.display.index);
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(sensor_client::EndpointError::Desktop(error.to_string()))
+                        }
+                    };
+                    telemetry.encode_us += encode_at.elapsed().as_micros() as u64;
+                    let send_at = Instant::now();
+                    send_video_packets(
+                        &mut writer,
+                        packets,
+                        generation,
+                        control,
+                        &mut flight,
+                        &mut telemetry,
+                    )?;
+                    feedback.write_stall_ms = feedback
+                        .write_stall_ms
+                        .max(send_at.elapsed().as_millis() as u64);
+                    last_frame = frame_started;
                 }
                 None => thread::sleep(Duration::from_millis(1)),
             }
@@ -1148,6 +1336,9 @@ fn execute_remote(
         )))
         .map_err(|_| "Window closed".to_owned())?;
     let (mut reader, mut writer) = connection.split().map_err(|error| error.to_string())?;
+    writer
+        .set_timeout(Duration::from_millis(250))
+        .map_err(|error| error.to_string())?;
     let (commands, command_receiver) = mpsc::sync_channel(256);
     let (clipboard_send, clipboard_receive) = mpsc::sync_channel::<String>(1);
     control.grant_clipboard(clipboard_mode);
@@ -1208,6 +1399,7 @@ fn execute_remote(
     let result = (|| {
         let mut assembler = sensor_media::Assembler::default();
         let mut decoder: Option<codec::H264Decoder> = None;
+        let mut generation = 0;
         loop {
             let message: Message = match reader.receive() {
                 Ok(message) => message,
@@ -1228,6 +1420,7 @@ fn execute_remote(
                 }
                 Message::Desktop(DesktopMessage::Format(format)) => {
                     format.validate().map_err(|error| error.to_string())?;
+                    generation = format.generation;
                     decoder = Some(
                         codec::H264Decoder::new(format.width, format.height, format.fps_limit)
                             .map_err(|error| error.to_string())?,
@@ -1248,9 +1441,19 @@ fn execute_remote(
                     let decoder = decoder
                         .as_mut()
                         .ok_or_else(|| "Received video before its format.".to_owned())?;
+                    let sequence = frame.timestamp_100ns as u64;
+                    let decode_at = Instant::now();
                     for frame in decoder.decode(&frame).map_err(|error| error.to_string())? {
                         control.publish_frame(frame);
                     }
+                    commands
+                        .try_send(DesktopMessage::FrameAck {
+                            generation,
+                            sequence,
+                            decode_us: decode_at.elapsed().as_micros() as u64,
+                            rtt_us: control.rtt_micros.load(Ordering::Relaxed),
+                        })
+                        .map_err(|_| "Frame feedback queue stalled".to_owned())?;
                 }
                 Message::Desktop(DesktopMessage::Cursor { x, y, visible, .. }) => {
                     events
@@ -1276,10 +1479,19 @@ fn execute_remote(
                     }
                 }
                 Message::Desktop(DesktopMessage::Error(error)) => return Err(error),
+                Message::Desktop(DesktopMessage::Telemetry(value)) => {
+                    *control
+                        .telemetry
+                        .lock()
+                        .map_err(|_| "Telemetry unavailable".to_owned())? = Some(value);
+                }
                 Message::Desktop(DesktopMessage::Input { .. })
                 | Message::Desktop(DesktopMessage::SelectDisplay(_))
                 | Message::Desktop(DesktopMessage::SelectVideoProfile(_)) => {
                     return Err("Peer sent an invalid desktop command.".into())
+                }
+                Message::Desktop(DesktopMessage::FrameAck { .. }) => {
+                    return Err("Invalid viewer feedback direction".into())
                 }
                 _ => return Err("Unexpected message in remote desktop session.".into()),
             }

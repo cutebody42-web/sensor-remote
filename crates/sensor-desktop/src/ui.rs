@@ -182,8 +182,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 request_clipboard: false,
                 actual_size: false,
                 fullscreen: false,
-                video_profile: sensor_media::VideoProfile::Balanced,
+                video_profile: sensor_media::VideoProfile::Auto,
                 fps_sample: (Instant::now(), 0, 0.0),
+                rate_sample: (0, 0, 0.0, 0.0),
+                encoder_sample: (0, 0, 0.0),
                 remote_source_listener: false,
                 remote_buttons: [false; 3],
                 remote_focused: false,
@@ -260,6 +262,8 @@ struct App {
     fullscreen: bool,
     video_profile: sensor_media::VideoProfile,
     fps_sample: (Instant, u64, f64),
+    rate_sample: (u64, u64, f64, f64),
+    encoder_sample: (u64, u64, f64),
     remote_source_listener: bool,
     remote_buttons: [bool; 3],
     remote_focused: bool,
@@ -563,8 +567,10 @@ impl App {
             self.remote_focused = false;
             self.remote_buttons = [false; 3];
             self.remote_modifiers = [false; 3];
-            self.video_profile = sensor_media::VideoProfile::Balanced;
+            self.video_profile = sensor_media::VideoProfile::Auto;
             self.fps_sample = (Instant::now(), 0, 0.0);
+            self.rate_sample = (0, 0, 0.0, 0.0);
+            self.encoder_sample = (0, 0, 0.0);
             self.remote_control = false;
             self.remote_source_listener = false;
         }
@@ -1379,6 +1385,12 @@ impl App {
                 let (frames, bytes, rtt) = control.statistics();
                 let elapsed = self.fps_sample.0.elapsed().as_secs_f64();
                 if elapsed >= 1.0 {
+                    let presented = control.presented_frames();
+                    self.rate_sample = (
+                        bytes, presented,
+                        bytes.saturating_sub(self.rate_sample.0) as f64 * 8.0 / elapsed / 1_000_000.0,
+                        presented.saturating_sub(self.rate_sample.1) as f64 / elapsed,
+                    );
                     self.fps_sample = (
                         Instant::now(),
                         frames,
@@ -1386,10 +1398,22 @@ impl App {
                     );
                 }
                 ui.label(format!(
-                    "Measured {:.1} fps · {frames} frames · {} KiB",
+                    "Decode {:.1} fps · UI {:.1} fps · {:.2} Mbps",
                     self.fps_sample.2,
-                    bytes / 1024
+                    self.rate_sample.3,
+                    self.rate_sample.2,
                 ));
+                if let Some(telemetry) = control.telemetry() {
+                    if telemetry.elapsed_ms > self.encoder_sample.0 {
+                        self.encoder_sample = (telemetry.elapsed_ms, telemetry.encoded,
+                            telemetry.encoded.saturating_sub(self.encoder_sample.1) as f64 * 1000.0 /
+                            (telemetry.elapsed_ms - self.encoder_sample.0) as f64);
+                    }
+                    ui.label(format!("Encode {:.1} fps · skipped {} · pending {} KiB{}",
+                        self.encoder_sample.2, telemetry.skipped, telemetry.in_flight_bytes / 1024,
+                        if telemetry.congestion { " · reducing load" } else { "" }))
+                        .on_hover_text("Measured rates, not target rates. UI counts distinct frames submitted for presentation, not monitor scanout. Skipped counts capture opportunities withheld before encoding; network packet loss is not measurable on TCP.");
+                }
                 if rtt > 0 {
                     ui.label(format!("RTT {:.1} ms", rtt as f64 / 1000.0));
                 }
@@ -1401,7 +1425,7 @@ impl App {
                 egui::ComboBox::from_id_salt("video-quality")
                     .selected_text(profile.label())
                     .show_ui(ui, |ui| {
-                        for choice in [sensor_media::VideoProfile::Balanced, sensor_media::VideoProfile::SharpText, sensor_media::VideoProfile::Smooth] {
+                        for choice in [sensor_media::VideoProfile::Auto, sensor_media::VideoProfile::Quality, sensor_media::VideoProfile::Balanced, sensor_media::VideoProfile::Performance] {
                             ui.selectable_value(&mut profile, choice, choice.label());
                         }
                     });
@@ -1413,7 +1437,8 @@ impl App {
                         }
                     }
                 }
-                ui.label("Both PCs: 0.3.4+. Actual fps depends on motion, hardware and network; Internet video remains capped at 1.5 Mbps.");
+                ui.label("Adaptive · up to 1080p60")
+                    .on_hover_text("Install this adaptive build on both PCs. Resolution, frame rate and bitrate adjust to measured delivery and codec load. SENSOR_VIDEO_MAX_BITRATE sets the host ceiling (default 16 Mbps). Static screens naturally produce fewer frames.");
             });
         }
         let mode_label = if self.remote_control {
@@ -1465,8 +1490,10 @@ impl App {
             let format = self.remote_format.clone();
             if let Some(format) = &format {
                 ui.label(format!(
-                    "{} • {}×{} stream • {} fps limit • {} • {}",
+                    "{} · capture {}×{} → encoded {}×{} · target {} fps · {} · {}",
                     format.display.name,
+                    format.display.width,
+                    format.display.height,
                     format.width,
                     format.height,
                     format.fps_limit,
@@ -1503,6 +1530,9 @@ impl App {
                     ));
                 }
                 self.uploaded_frame = Some(frame.clone());
+                if let Some(control) = self.active_remote_control() {
+                    control.mark_presented();
+                }
             }
             let available = ui.available_size();
             let aspect = frame.width as f32 / frame.height as f32;
@@ -1976,6 +2006,13 @@ impl eframe::App for App {
             self.release_remote_input();
             self.fullscreen = !self.fullscreen;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.fullscreen));
+        }
+        if self.fullscreen
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            self.release_remote_input();
+            self.fullscreen = false;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         self.poll();
         if let Some(receiver) = &self.update_check {

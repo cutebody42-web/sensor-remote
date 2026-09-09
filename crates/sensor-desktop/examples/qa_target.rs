@@ -8,6 +8,7 @@ fn main() -> eframe::Result {
         frames: u64,
         clicked: u64,
         wheel: bool,
+        keyboard: bool,
     }
     impl eframe::App for Target {
         fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
@@ -31,6 +32,7 @@ fn main() -> eframe::Result {
                 }
                 if response.clicked() { self.clicked += 1; }
                 self.wheel |= ctx.input(|i| i.raw_scroll_delta.y != 0.0);
+                self.keyboard |= ctx.input(|i| i.key_pressed(egui::Key::End));
                 ui.label(format!("Verified clicks: {} | Wheel received: {} | Exact text: {}", self.clicked, self.wheel, self.text == "SENSOR QA مرحبا 123"));
                 let viewport = ctx.input(|i| i.viewport().clone());
                 if let Some(inner) = viewport.inner_rect {
@@ -39,6 +41,7 @@ fn main() -> eframe::Result {
                         "focused": viewport.focused == Some(true), "text_focused": response.has_focus(),
                         "text_center": [position.x, position.y], "typed_expected": self.text == "SENSOR QA مرحبا 123",
                         "clicks": self.clicked, "wheel": self.wheel, "painted_frames": self.frames,
+                        "keyboard": self.keyboard,
                     });
                     if let Some(parent) = self.path.parent() {
                         if let Ok(mut file) = tempfile::NamedTempFile::new_in(parent) {
@@ -77,6 +80,7 @@ fn main() -> eframe::Result {
                 frames: 0,
                 clicked: 0,
                 wheel: false,
+                keyboard: false,
             }))
         }),
     )

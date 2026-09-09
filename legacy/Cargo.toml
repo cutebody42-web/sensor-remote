@@ -1,0 +1,16 @@
+[workspace]
+
+[package]
+name = "sensor-legacy-capture-probe"
+version = "0.3.4"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+
+# Deliberately excludes eframe/wgpu/DX12. This is a capability probe, NOT a
+# Windows 7 release or a substitute for the authenticated remote application.
+[dependencies]
+sensor-windows = { path = "../crates/sensor-windows" }
+sensor-session = { path = "../crates/sensor-session" }
+sensor-media = { path = "../crates/sensor-media" }
+

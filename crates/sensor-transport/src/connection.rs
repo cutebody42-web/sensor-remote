@@ -459,6 +459,15 @@ impl SecureReader {
     }
 }
 impl SecureWriter {
+    /// Independent record-write deadline; long idle read deadlines must not
+    /// allow interactive video to block a writer for minutes.
+    pub fn set_timeout(&mut self, timeout: Duration) -> Result<(), ConnectionError> {
+        if timeout.is_zero() || timeout > Duration::from_secs(600) {
+            return Err(ConnectionError::UnexpectedMessage);
+        }
+        self.timeout = timeout;
+        Ok(())
+    }
     pub fn send<T: Serialize>(&mut self, message: &T) -> Result<(), ConnectionError> {
         let result = (|| {
             if self.state.failed.load(Ordering::SeqCst) {

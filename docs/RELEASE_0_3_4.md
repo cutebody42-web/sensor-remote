@@ -1,4 +1,4 @@
-# SENSOR 0.3.4 — nonblocking desktop transport
+# SENSOR 0.3.4 — adaptive engineering build
 
 Includes the [0.3.3 ID-only/security fixes](RELEASE_0_3_3.md).
 
@@ -7,13 +7,13 @@ The installed 0.3.3 GUI reached a separate cloud Windows host by ID on
 However its RTT grew to 30 seconds, making input unacceptable; the two-computer
 input gate failed and is not counted as a pass.
 
-Full screen is now a clearly labelled button (Ctrl+Alt+F). The UI reports
-measured decoder fps separately from the encoder's target. Video profiles are
-Balanced (up to 720p/30 fps), Sharp text (up to 1080p/15 fps), and Smooth (up to
-720p/60 fps). Profile switching requires 0.3.4 on both PCs, releases held input
-and creates a new authenticated display generation. Profiles never upscale
-the source display. The existing Internet video budget remains 1.5 Mbps;
-high-motion 1080p60 quality is not promised on the current 2 Mbps relay.
+The original fixed-profile 0.3.4 build has been superseded by the adaptive
+engineering build on the same release line. Install matching builds on both
+PCs: identical 0.3.4 version labels do not make the older wire protocol compatible.
+See [adaptive architecture and measured evidence](ADAPTIVE-0.3.4.md) for current
+limits, source/encoded/display measurements, fullscreen controls, native MFT
+fallback and 1080 aperture correction. Actual 1080p60 remote presentation is
+not yet certified; target FPS is never presented as measured FPS.
 
 0.3.4 replaces serial blocking TCP/WebSocket bridge polling with nonblocking
 duplex I/O. Pending writes are bounded, partial writes preserved, and stalled

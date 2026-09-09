@@ -90,13 +90,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Report the socket actually reserved by the OS, including PORT=0.
     println!("SENSOR_LISTEN_ADDRESS={}", listener.local_addr()?);
     let limits = Limits {
-        max_bitrate: optional_u64("RELAY_MAX_BITRATE")?.or(Some(2_000_000)),
+        max_bitrate: Some(
+            optional_u64("RELAY_MAX_BITRATE")?
+                .unwrap_or(20_000_000)
+                .clamp(300_000, 50_000_000),
+        ),
         max_fps: optional_u64("RELAY_MAX_FPS")?
             .map(|value| value as u32)
-            .or(Some(15)),
+            .or(Some(60)),
         max_resolution: env::var("RELAY_MAX_RESOLUTION")
             .ok()
-            .or(Some("1280x720".into())),
+            .or(Some("1920x1080".into())),
     };
     let state = Arc::new(State {
         devices: Mutex::new(HashMap::new()),
@@ -473,76 +477,107 @@ fn relay_pair(
         socket.set_config(|c| {
             c.max_message_size = Some(MAX_RELAY_BYTES);
             c.max_frame_size = Some(MAX_RELAY_BYTES);
+            c.write_buffer_size = 0;
+            c.max_write_buffer_size = MAX_RELAY_BYTES + 64 * 1024;
         });
         socket
             .get_mut()
-            .set_read_timeout(Some(SOCKET_POLL))
-            .map_err(|e| e.to_string())?;
-        socket
-            .get_mut()
-            .set_write_timeout(Some(Duration::from_secs(5)))
+            .set_nonblocking(true)
             .map_err(|e| e.to_string())?;
     }
-    let mut limiter = RateLimiter::new(limits.max_bitrate);
+    let mut target = RelayEndpoint::new(target_websocket, limits.max_bitrate);
+    let mut initiator = RelayEndpoint::new(initiator_websocket, limits.max_bitrate);
     loop {
-        let mut progressed = false;
-        match target_websocket.read() {
-            Ok(Message::Binary(bytes)) if bytes.len() <= MAX_RELAY_BYTES => {
-                metrics
-                    .relayed_bytes
-                    .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                limiter.wait(bytes.len());
-                initiator_websocket
-                    .send(Message::binary(bytes))
-                    .map_err(|error| error.to_string())?;
-                progressed = true;
-            }
-            Ok(Message::Ping(payload)) => {
-                target_websocket
-                    .send(Message::Pong(payload))
-                    .map_err(|error| error.to_string())?;
-                progressed = true;
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Pong(_)) => progressed = true,
-            Ok(Message::Text(_)) | Ok(Message::Frame(_)) | Ok(Message::Binary(_)) => break,
-            Err(tungstenite::Error::Io(error))
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error.to_string()),
+        target.flush()?;
+        initiator.flush()?;
+        // Viewer input has first opportunity. Each direction has independent
+        // nonblocking pacing: a video budget wait never sleeps the input path.
+        if !relay_step(&mut initiator, &mut target, metrics)?
+            || !relay_step(&mut target, &mut initiator, metrics)?
+        {
+            break;
         }
-        match initiator_websocket.read() {
-            Ok(Message::Binary(bytes)) if bytes.len() <= MAX_RELAY_BYTES => {
-                metrics
-                    .relayed_bytes
-                    .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
-                limiter.wait(bytes.len());
-                target_websocket
-                    .send(Message::binary(bytes))
-                    .map_err(|error| error.to_string())?;
-                progressed = true;
-            }
-            Ok(Message::Ping(payload)) => {
-                initiator_websocket
-                    .send(Message::Pong(payload))
-                    .map_err(|error| error.to_string())?;
-                progressed = true;
-            }
-            Ok(Message::Close(_)) => break,
-            Ok(Message::Pong(_)) => progressed = true,
-            Ok(Message::Text(_)) | Ok(Message::Frame(_)) | Ok(Message::Binary(_)) => break,
-            Err(tungstenite::Error::Io(error))
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::TimedOut => {}
-            Err(error) => return Err(error.to_string()),
-        }
-        if !progressed {
-            thread::sleep(SOCKET_POLL);
+        thread::sleep(Duration::from_millis(1));
+    }
+    let _ = target.socket.close(None);
+    let _ = initiator.socket.close(None);
+    Ok(())
+}
+
+struct RelayEndpoint {
+    socket: ServerWebSocket,
+    pending: Option<Message>,
+    ready: Instant,
+    limiter: RateLimiter,
+    writing: bool,
+    write_started: Instant,
+}
+impl RelayEndpoint {
+    fn new(socket: ServerWebSocket, bitrate: Option<u64>) -> Self {
+        Self {
+            socket,
+            pending: None,
+            ready: Instant::now(),
+            limiter: RateLimiter::new(bitrate),
+            writing: false,
+            write_started: Instant::now(),
         }
     }
-    let _ = target_websocket.close(None);
-    let _ = initiator_websocket.close(None);
-    Ok(())
+    fn flush(&mut self) -> Result<(), String> {
+        if self.writing {
+            match self.socket.flush() {
+                Ok(()) => self.writing = false,
+                Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if self.write_started.elapsed() > Duration::from_secs(5) {
+                        return Err("relay write stalled".into());
+                    }
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        Ok(())
+    }
+}
+fn relay_step(
+    source: &mut RelayEndpoint,
+    destination: &mut RelayEndpoint,
+    metrics: &Metrics,
+) -> Result<bool, String> {
+    if source.pending.is_none() {
+        match source.socket.read() {
+            Ok(Message::Binary(bytes)) if bytes.len() <= MAX_RELAY_BYTES => {
+                source.ready = source.limiter.reserve(bytes.len());
+                metrics
+                    .relayed_bytes
+                    .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                source.pending = Some(Message::Binary(bytes));
+            }
+            Ok(Message::Ping(_)) => {
+                if !source.writing {
+                    source.write_started = Instant::now();
+                }
+                source.writing = true; // Tungstenite queued the Pong automatically.
+            }
+            Ok(Message::Pong(_)) => (),
+            Ok(Message::Close(_)) => return Ok(false),
+            Ok(_) => return Err("invalid relay frame".into()),
+            Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => (),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    if !destination.writing && Instant::now() >= source.ready {
+        if let Some(message) = source.pending.take() {
+            match destination.socket.send(message) {
+                Ok(()) => (),
+                Err(tungstenite::Error::Io(e)) if e.kind() == io::ErrorKind::WouldBlock => {
+                    destination.writing = true;
+                    destination.write_started = Instant::now();
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+    Ok(true)
 }
 
 fn find_target(state: &Arc<State>, device_id: &str, expected_key: &str) -> Result<Target, String> {
@@ -674,30 +709,24 @@ fn optional_u64(name: &str) -> Result<Option<u64>, Box<dyn std::error::Error>> {
 
 struct RateLimiter {
     max_bitrate: Option<u64>,
-    window: Instant,
-    bytes: u64,
+    next: Instant,
 }
 
 impl RateLimiter {
     fn new(max_bitrate: Option<u64>) -> Self {
         Self {
             max_bitrate,
-            window: Instant::now(),
-            bytes: 0,
+            next: Instant::now(),
         }
     }
 
-    fn wait(&mut self, bytes: usize) {
+    fn reserve(&mut self, bytes: usize) -> Instant {
         let Some(limit) = self.max_bitrate.filter(|limit| *limit > 0) else {
-            return;
+            return Instant::now();
         };
-        if self.window.elapsed() >= Duration::from_secs(1) {
-            self.window = Instant::now();
-            self.bytes = 0;
-        }
-        self.bytes = self.bytes.saturating_add(bytes as u64);
-        let required = Duration::from_secs_f64(self.bytes as f64 * 8.0 / limit as f64);
-        thread::sleep(required.saturating_sub(self.window.elapsed()));
+        let due = self.next.max(Instant::now());
+        self.next = due + Duration::from_secs_f64(bytes as f64 * 8.0 / limit as f64);
+        due
     }
 }
 

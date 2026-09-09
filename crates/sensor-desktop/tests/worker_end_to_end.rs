@@ -173,9 +173,33 @@ fn native_worker_chat_is_bidirectional_and_local_stop_interrupts_wait() {
     };
     assert_eq!(text, "test from host");
     let _waiting = compose(&sender);
+    let stopped_at = std::time::Instant::now();
     sender.control.stop();
     assert!(finish(&sender).is_ok());
     assert!(finish(&receiver).is_err()); // Transport abort is recorded, not a fake graceful close.
+    assert!(stopped_at.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn native_worker_explicit_chat_close_is_graceful_on_both_ends() {
+    let host_dir = tempfile::tempdir().unwrap();
+    let client_dir = tempfile::tempdir().unwrap();
+    let host = DeviceIdentity::generate();
+    let client = DeviceIdentity::generate();
+    let expected = pin(&host);
+    let (receiver, address) = listen(host, pin(&client), host_dir.path());
+    let sender = worker::start(
+        Task::Chat {
+            route: Route::Direct(address),
+        },
+        client,
+        expected,
+        client_dir.path().into(),
+    );
+    consent(&receiver, true);
+    compose(&sender).send(None).unwrap();
+    assert!(finish(&sender).is_ok());
+    assert!(finish(&receiver).is_ok());
 }
 
 #[test]

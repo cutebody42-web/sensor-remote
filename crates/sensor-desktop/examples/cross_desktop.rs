@@ -139,11 +139,12 @@ mod fixture {
                             serde_json::from_slice(&fs::read(root.join("qa-state.json"))?)?;
                         if state["typed_expected"] != true
                             || state["wheel"] != true
+                            || state["keyboard"] != true
                             || state["clicks"].as_u64().unwrap_or(0) == 0
                         {
                             return Err("Cloud QA did not verify actual Unicode keyboard, mouse click and wheel".into());
                         }
-                        println!("CROSS_COMPUTER_INPUT_PASS native_unicode=true mouse_click=true wheel=true");
+                        println!("CROSS_COMPUTER_INPUT_PASS native_unicode=true native_keyboard=true mouse_click=true wheel=true");
                     }
                     println!("CROSS_DESKTOP_HOST_PASS platform=windows captured={captured} encoded={encoded} explicit_view_only={}", !input);
                     return Ok(());
@@ -187,6 +188,9 @@ mod fixture {
         let mut format_seen = false;
         let mut format_value = None;
         let mut input_sent = false;
+        let mut max_rtt = 0u64;
+        let mut latency_samples = 0u64;
+        let mut telemetry_at = 0;
         while Instant::now() < until {
             while let Ok(event) = job.events.try_recv() {
                 match event {
@@ -215,6 +219,16 @@ mod fixture {
                 first_pixels.get_or_insert(digest);
             }
             let (frames, bytes, rtt) = job.control.statistics();
+            if let Some(t) = job.control.telemetry() {
+                if t.elapsed_ms != telemetry_at {
+                    telemetry_at = t.elapsed_ms;
+                    println!("CLOUD_PIPELINE elapsed_ms={} captured={} encoded={} bytes={} skipped={} delivery_ms={} pending_bytes={} capture_us={} prepare_us={} encode_us={} send_us={} congested={}",t.elapsed_ms,t.captured,t.encoded,t.bytes,t.skipped,t.delivery_ms,t.in_flight_bytes,t.capture_us,t.prepare_us,t.encode_us,t.send_us,t.congestion);
+                    if rtt > 0 && started.elapsed() > Duration::from_secs(5) {
+                        max_rtt = max_rtt.max(rtt);
+                        latency_samples += 1;
+                    }
+                }
+            }
             if let (Some(qa), Some(format)) = (qa, &format_value) {
                 if !input_sent && frames > 4 {
                     let state_bytes = fs::read(qa)?;
@@ -247,6 +261,14 @@ mod fixture {
                             down: false,
                         },
                         Input::Text("SENSOR QA مرحبا 123".into()),
+                        Input::Key {
+                            virtual_key: 0x23,
+                            down: true,
+                        },
+                        Input::Key {
+                            virtual_key: 0x23,
+                            down: false,
+                        },
                         Input::Wheel {
                             delta: -120,
                             horizontal: false,
@@ -266,19 +288,34 @@ mod fixture {
                 }
             }
             if frames >= 5 && changed && rtt > 0 && started.elapsed() > Duration::from_secs(30) {
+                if latency_samples < 10 || max_rtt > 750_000 {
+                    return Err(format!("Control latency gate failed: samples={latency_samples} maximum_rtt_us={max_rtt} limit_us=750000").into());
+                }
                 if qa.is_some() && !input_sent {
                     return Err("Input not sent".into());
                 }
                 if !job.control.send_remote(sensor_media::DesktopMessage::Close) {
                     return Err("cannot send graceful desktop close".into());
                 }
-                let end = Instant::now() + Duration::from_secs(5);
+                let close_started = Instant::now();
+                let end = close_started + Duration::from_secs(2);
                 while !job.is_finished() && Instant::now() < end {
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 if !job.is_finished() {
-                    return Err("desktop shutdown exceeded five seconds".into());
+                    return Err("desktop shutdown exceeded two seconds".into());
                 }
+                let mut clean = false;
+                while let Ok(event) = job.events.try_recv() {
+                    if let Event::Finished(result) = event {
+                        result?;
+                        clean = true;
+                    }
+                }
+                if !clean {
+                    return Err("missing clean worker close acknowledgement".into());
+                }
+                println!("CROSS_LATENCY_PASS samples={latency_samples} maximum_rtt_us={max_rtt} close_ms={}",close_started.elapsed().as_millis());
                 println!("CROSS_DESKTOP_VIEWER_PASS platform=windows frames={frames} encoded_bytes={bytes} first_frame_ms={} rtt_us={rtt} changed_pixels=true", first_frame.unwrap_or_default().as_millis());
                 return Ok(());
             }

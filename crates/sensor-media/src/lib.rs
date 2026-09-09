@@ -1,12 +1,15 @@
 //! Bounded remote video/input wire types and independently testable pixel transforms.
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+pub mod adaptive;
+#[cfg(target_arch = "x86_64")]
+mod pixels_avx2;
 
 pub const MAX_WIDTH: u32 = 4096;
 pub const MAX_HEIGHT: u32 = 4096;
 pub const MAX_PIXELS: usize = 4096 * 2160;
 pub const MAX_ENCODED_FRAME: usize = 8 * 1024 * 1024;
-pub const VIDEO_FRAGMENT: usize = 128 * 1024;
+pub const VIDEO_FRAGMENT: usize = 16 * 1024;
 pub const MAX_CLIPBOARD_BYTES: usize = 64 * 1024;
 
 pub fn validate_clipboard(text: &str) -> Result<(), MediaError> {
@@ -103,38 +106,30 @@ pub struct VideoFormat {
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum VideoProfile {
-    #[default]
     Balanced,
-    SharpText,
-    Smooth,
+    Quality,
+    Performance,
+    #[default]
+    Auto,
 }
 impl VideoProfile {
     pub fn fps(self) -> u32 {
         match self {
             Self::Balanced => 30,
-            Self::SharpText => 15,
-            Self::Smooth => 60,
+            Self::Quality => 60,
+            Self::Performance | Self::Auto => 60,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
-            Self::Balanced => "Balanced · up to 720p / 30 fps",
-            Self::SharpText => "Sharp text · up to 1080p / 15 fps",
-            Self::Smooth => "Smooth · up to 720p / 60 fps",
+            Self::Balanced => "Balanced",
+            Self::Quality => "Quality",
+            Self::Performance => "Performance",
+            Self::Auto => "Auto / Adaptive",
         }
     }
     pub fn dimensions(self, width: u32, height: u32) -> Result<(u32, u32), MediaError> {
-        let (width, height) = stream_size(width, height)?;
-        let (max_w, max_h) = if self == Self::SharpText {
-            (1920.0, 1080.0)
-        } else {
-            (1280.0, 720.0)
-        };
-        let scale = (max_w / width as f64).min(max_h / height as f64).min(1.0);
-        Ok((
-            ((width as f64 * scale) as u32 / 16 * 16).max(16),
-            ((height as f64 * scale) as u32 / 16 * 16).max(16),
-        ))
+        stream_size(width, height)
     }
 }
 impl VideoFormat {
@@ -187,6 +182,13 @@ pub enum DesktopMessage {
     ClipboardText(String),
     // Optional 0.3.4+ viewer command. Both endpoints must be updated.
     SelectVideoProfile(VideoProfile),
+    FrameAck {
+        generation: u64,
+        sequence: u64,
+        decode_us: u64,
+        rtt_us: u64,
+    },
+    Telemetry(adaptive::Telemetry),
 }
 
 #[derive(Clone, Debug)]
@@ -208,17 +210,17 @@ pub struct EncodedFrame {
     pub bytes: Vec<u8>,
 }
 
-/// Bound the initial software conversion path; stream dimensions are multiples
-/// of 16 for portable NV12 decoder pitch. Input coordinates remain native-sized.
+/// Visible dimensions stay even, not macroblock-rounded. Decoder storage pitch
+/// and padding are handled separately. Input coordinates remain native-sized.
 pub fn stream_size(width: u32, height: u32) -> Result<(u32, u32), MediaError> {
     pixels(width, height)?;
     if width < 16 || height < 16 {
         return Err(MediaError::Dimensions);
     }
-    let scale = (1920.0 / width as f64).min(1088.0 / height as f64).min(1.0);
+    let scale = (1920.0 / width as f64).min(1080.0 / height as f64).min(1.0);
     Ok((
-        ((width as f64 * scale) as u32 / 16 * 16).max(16),
-        ((height as f64 * scale) as u32 / 16 * 16).max(16),
+        ((width as f64 * scale) as u32 / 2 * 2).max(16),
+        ((height as f64 * scale) as u32 / 2 * 2).max(16),
     ))
 }
 
@@ -304,20 +306,49 @@ pub fn nv12_to_rgba(
     height: u32,
     stride: usize,
 ) -> Result<DecodedFrame, MediaError> {
+    nv12_to_rgba_padded(bytes, width, height, stride, height)
+}
+
+/// NV12 chroma starts after the STORAGE luma plane, not the visible aperture.
+pub fn nv12_to_rgba_padded(
+    bytes: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+    storage_height: u32,
+) -> Result<DecodedFrame, MediaError> {
     let count = pixels(width, height)?;
     if !width.is_multiple_of(2)
         || !height.is_multiple_of(2)
         || stride < width as usize
         || stride > MAX_WIDTH as usize * 4
-        || bytes.len() < stride * height as usize * 3 / 2
+        || storage_height < height
+        || storage_height > MAX_HEIGHT
+        || !storage_height.is_multiple_of(2)
+        || bytes.len() < stride * storage_height as usize * 3 / 2
     {
         return Err(MediaError::Frame);
     }
     let mut rgba = vec![0; count * 4];
+    #[cfg(target_arch = "x86_64")]
+    let avx2 = std::is_x86_feature_detected!("avx2");
     for y in 0..height as usize {
-        for x in 0..width as usize {
+        let mut start = 0;
+        #[cfg(target_arch = "x86_64")]
+        if avx2 {
+            let chroma_row = stride * storage_height as usize + y / 2 * stride;
+            // All slices derive from the validated plane lengths above.
+            start = unsafe {
+                pixels_avx2::row(
+                    &bytes[y * stride..y * stride + width as usize],
+                    &bytes[chroma_row..chroma_row + width as usize],
+                    &mut rgba[y * width as usize * 4..(y + 1) * width as usize * 4],
+                )
+            };
+        }
+        for x in start..width as usize {
             let c = (bytes[y * stride + x] as i32 - 16).max(0);
-            let chroma = stride * height as usize + (y / 2) * stride + (x / 2) * 2;
+            let chroma = stride * storage_height as usize + (y / 2) * stride + (x / 2) * 2;
             let d = bytes[chroma] as i32 - 128;
             let e = bytes[chroma + 1] as i32 - 128;
             let p = (y * width as usize + x) * 4;
@@ -412,26 +443,45 @@ impl Assembler {
 mod tests {
     use super::*;
     #[test]
+    fn padded_nv12_uses_storage_plane_offset_and_crops_only_padding() {
+        let mut bytes = vec![0; 32 * 32 * 3 / 2];
+        bytes[..32 * 32].fill(81);
+        for uv in bytes[32 * 32..].as_chunks_mut::<2>().0 {
+            uv.copy_from_slice(&[90, 240]);
+        }
+        let frame = nv12_to_rgba_padded(&bytes, 30, 18, 32, 32).unwrap();
+        assert_eq!(
+            (frame.width, frame.height, frame.rgba.len()),
+            (30, 18, 30 * 18 * 4)
+        );
+        for pixel in frame.rgba.as_chunks::<4>().0 {
+            assert!(pixel[0] > 245 && pixel[1] < 5 && pixel[2] < 5);
+        }
+        assert!(nv12_to_rgba_padded(&bytes, 30, 18, 32, 16).is_err());
+        assert!(nv12_to_rgba_padded(&bytes[..10], 30, 18, 32, 32).is_err());
+    }
+    #[test]
     fn video_profiles_are_bounded_and_never_upscale_small_displays() {
         for profile in [
             VideoProfile::Balanced,
-            VideoProfile::SharpText,
-            VideoProfile::Smooth,
+            VideoProfile::Quality,
+            VideoProfile::Performance,
+            VideoProfile::Auto,
         ] {
             assert_eq!(profile.dimensions(960, 720).unwrap(), (960, 720));
             let (width, height) = profile.dimensions(3840, 2160).unwrap();
             assert!(
                 width <= 1920
                     && height <= 1080
-                    && width.is_multiple_of(16)
-                    && height.is_multiple_of(16)
+                    && width.is_multiple_of(2)
+                    && height.is_multiple_of(2)
             );
             assert!(profile.fps() <= 60);
         }
-        assert_eq!(VideoProfile::Smooth.fps(), 60);
+        assert_eq!(VideoProfile::Performance.fps(), 60);
         assert_eq!(
-            VideoProfile::SharpText.dimensions(1920, 1080).unwrap(),
-            (1920, 1072)
+            VideoProfile::Quality.dimensions(1920, 1080).unwrap(),
+            (1920, 1080)
         );
     }
     #[test]
@@ -511,7 +561,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             [3, 1, 4, 2]
         );
-        assert_eq!(stream_size(1920, 1080).unwrap(), (1920, 1072));
+        assert_eq!(stream_size(1920, 1080).unwrap(), (1920, 1080));
         assert!(Input::Key {
             virtual_key: 65535,
             down: true
