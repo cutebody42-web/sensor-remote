@@ -52,6 +52,7 @@ pub struct Adaptive {
     healthy: u8,
     pub congested: bool,
     fps_ceiling: u32,
+    faster_windows: u8,
 }
 impl Adaptive {
     pub fn new(ceiling: u32) -> Self {
@@ -64,6 +65,7 @@ impl Adaptive {
             healthy: 0,
             congested: false,
             fps_ceiling: 60,
+            faster_windows: 0,
         }
     }
     pub fn bitrate(&self) -> u32 {
@@ -80,10 +82,26 @@ impl Adaptive {
             || f.write_stall_ms > 80
             || (f.delivery_ms > latency_limit && f.delivery_ms > 200);
         let work_us = f.decode_us.max(f.prepare_encode_us);
-        if work_us > 25_000 {
-            self.fps_ceiling = (850_000 / work_us).clamp(10, 60) as u32;
-        } else if f.acknowledged != 0 && !self.congested {
-            self.fps_ceiling = (self.fps_ceiling + 5).min(60);
+        // Quantize and add recovery hysteresis. Fractional measured capacity
+        // previously recreated the MFT almost every second (e.g. 13→17→12fps)
+        // on the real cloud runner, producing needless keyframes and blur.
+        let sustainable = (850_000 / work_us.max(1)).clamp(10, 60) as u32;
+        let tier = [10, 15, 24, 30, 60]
+            .into_iter()
+            .rev()
+            .find(|fps| *fps <= sustainable)
+            .unwrap_or(10);
+        if tier < self.fps_ceiling {
+            self.fps_ceiling = tier;
+            self.faster_windows = 0;
+        } else if tier > self.fps_ceiling && f.acknowledged != 0 && !self.congested {
+            self.faster_windows += 1;
+            if self.faster_windows >= 5 {
+                self.fps_ceiling = tier;
+                self.faster_windows = 0;
+            }
+        } else {
+            self.faster_windows = 0;
         }
         if self.congested {
             self.bitrate = (self.bitrate * 65 / 100).max(MIN_BITRATE).min(self.ceiling);
@@ -213,6 +231,28 @@ mod tests {
             ..healthy()
         });
         assert!(a.target(1920, 1080).unwrap().fps <= 15);
+    }
+    #[test]
+    fn variable_cpu_cost_does_not_recreate_encoder_every_second() {
+        let mut a = Adaptive::new(2_000_000);
+        a.observe(Feedback {
+            prepare_encode_us: 50_000,
+            ..healthy()
+        });
+        assert_eq!(a.target(1920, 1080).unwrap().fps, 15);
+        for cost in [48_000, 51_000, 45_000, 53_000, 47_000] {
+            a.observe(Feedback {
+                prepare_encode_us: cost,
+                ..healthy()
+            });
+            assert_eq!(a.target(1920, 1080).unwrap().fps, 15);
+        }
+        for _ in 0..4 {
+            a.observe(healthy());
+            assert_eq!(a.target(1920, 1080).unwrap().fps, 15);
+        }
+        a.observe(healthy());
+        assert_eq!(a.target(1920, 1080).unwrap().fps, 30);
     }
     #[test]
     fn flight_window_bounds_driver_queue_bytes_time_and_rejects_false_ack() {
