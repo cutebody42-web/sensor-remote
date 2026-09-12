@@ -1,4 +1,4 @@
-param([string]$OutputDirectory)
+param([string]$OutputDirectory, [switch]$UnifiedCandidate)
 $ErrorActionPreference = 'Stop'
 $repoPath = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 if (-not $OutputDirectory) {
@@ -15,11 +15,29 @@ Push-Location $repoPath
 try {
     & cargo build --workspace --release --locked
     if ($LASTEXITCODE) { throw 'Release build failed' }
-    $metadataText = & cargo metadata --format-version 1 --locked --filter-platform x86_64-pc-windows-msvc
+    $sensorBinaryRoot = 'target\release'
+    $sensorTarget = 'x86_64-pc-windows-msvc'
+    if ($UnifiedCandidate) {
+        & (Join-Path $PSScriptRoot 'build-unified-windows.ps1')
+        $sensorBinaryRoot = 'target\x86_64-win7-windows-msvc\release'
+        $sensorTarget = 'x86_64-win7-windows-msvc'
+    }
+    $metadataText = & cargo metadata --format-version 1 --locked --filter-platform $sensorTarget
     if ($LASTEXITCODE) { throw 'Dependency metadata failed' }
     $metadata = $metadataText | ConvertFrom-Json
     $null = New-Item -ItemType Directory -Path $packagePath
-    Copy-Item -LiteralPath 'target\release\SENSOR-Remote.exe','target\release\SENSOR-CLI.exe','target\release\sensor-relay.exe','target\release\sensor-rendezvous.exe','LICENSE','README.md','.env.example','sensor-network.json','render.yaml','railway.json','Start-SENSOR-Internet.cmd' -Destination $packagePath
+    Copy-Item -LiteralPath (Join-Path $sensorBinaryRoot 'SENSOR-Remote.exe'),(Join-Path $sensorBinaryRoot 'SENSOR-CLI.exe'),'target\release\sensor-relay.exe','target\release\sensor-rendezvous.exe','LICENSE','README.md','.env.example','sensor-network.json','render.yaml','railway.json','Start-SENSOR-Internet.cmd' -Destination $packagePath
+    if ($UnifiedCandidate) {
+        & (Join-Path $PSScriptRoot 'audit-windows7-imports.ps1') -Executable (Join-Path $packagePath 'SENSOR-Remote.exe') -Report (Join-Path $packagePath 'WINDOWS-IMPORTS.json')
+        & (Join-Path $PSScriptRoot 'audit-windows7-imports.ps1') -Executable (Join-Path $packagePath 'SENSOR-CLI.exe') -Report (Join-Path $packagePath 'CLI-WINDOWS-IMPORTS.json')
+        [ordered]@{
+            build_target = $sensorTarget
+            one_application_executable = $true
+            actual_windows7_runtime_verified = $false
+            status = 'UNIFIED_COMPATIBILITY_CANDIDATE_NOT_OS_CERTIFIED'
+            gui_sha256 = (Get-FileHash -LiteralPath (Join-Path $packagePath 'SENSOR-Remote.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $packagePath 'WINDOWS-BUILD.json') -Encoding utf8
+    }
     Copy-Item -LiteralPath 'docs' -Destination (Join-Path $packagePath 'docs') -Recurse
     Copy-Item -LiteralPath 'deployment' -Destination (Join-Path $packagePath 'deployment') -Recurse
     $licenseRoot = Join-Path $packagePath 'third-party-licenses'

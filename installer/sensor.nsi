@@ -26,7 +26,11 @@ VIAddVersionKey /LANG=1033 "FileDescription" "SENSOR per-user setup (unsigned bu
 VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "SENSOR TECHNOLOGY"
 !define MUI_ABORTWARNING
+!ifdef UNIFIED_CANDIDATE
+!define MUI_WELCOMEPAGE_TEXT "One SENSOR application for Windows 7 SP1 / 10 / 11 x64 compatibility testing.$\r$\n$\r$\nThe same EXE selects graphics internally. Windows 7/10 runtime acceptance has NOT been completed. Win7 requires a compatible OpenGL driver and Media Foundation.$\r$\n$\r$\nBoth computers must be online and the owner must authorize access. Unsigned engineering candidate; no login-screen/UAC service or firewall changes."
+!else
 !define MUI_WELCOMEPAGE_TEXT "Install SENSOR for the current Windows user.$\r$\n$\r$\nBoth computers need SENSOR running and Internet access. The remote owner must approve the session.$\r$\n$\r$\nThis build is unsigned and does not provide unattended, login-screen or UAC control. No firewall changes or background service are installed."
+!endif
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${PACKAGE}\LICENSE"
 !insertmacro MUI_PAGE_DIRECTORY
@@ -40,13 +44,31 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "SENSOR TECHNOLOGY"
 
 Function .onInit
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP "SENSOR requires 64-bit Windows 10 or later."
+    MessageBox MB_ICONSTOP "SENSOR requires 64-bit Windows."
     Abort
   ${EndIf}
+!ifdef UNIFIED_CANDIDATE
+  ${If} ${IsWin7}
+    ${IfNot} ${AtLeastServicePack} 1
+      MessageBox MB_ICONSTOP "Windows 7 requires Service Pack 1."
+      Abort
+    ${EndIf}
+    ; No silent deployment of an unverified Win7 candidate.
+    IfSilent sensor_win7_declined 0
+    MessageBox MB_YESNO|MB_ICONEXCLAMATION|MB_DEFBUTTON2 "This unified SENSOR candidate has NOT been tested on Windows 7. Continue with compatibility testing only?" IDYES sensor_os_accepted
+    sensor_win7_declined:
+      Abort
+  ${ElseIfNot} ${AtLeastWin10}
+    MessageBox MB_ICONSTOP "This candidate targets Windows 7 SP1 and Windows 10/11 x64 only."
+    Abort
+  ${EndIf}
+  sensor_os_accepted:
+!else
   ${IfNot} ${AtLeastWin10}
     MessageBox MB_ICONSTOP "SENSOR requires Windows 10 or later."
     Abort
   ${EndIf}
+!endif
   SetShellVarContext current
   SetRegView 64
 FunctionEnd
@@ -64,6 +86,11 @@ Section "SENSOR Remote" Main
   File "${PACKAGE}\SHA256SUMS.txt"
   File "${PACKAGE}\DEPENDENCIES.json"
   File "${PACKAGE}\sbom.cdx.json"
+!ifdef UNIFIED_CANDIDATE
+  File "${PACKAGE}\WINDOWS-BUILD.json"
+  File "${PACKAGE}\WINDOWS-IMPORTS.json"
+  File "${PACKAGE}\CLI-WINDOWS-IMPORTS.json"
+!endif
   ; Exact install/uninstall entries are generated from the built package.
   !include "payload-install.nsh"
   ${If} ${Errors}
@@ -111,6 +138,11 @@ Section "Uninstall"
   Delete "$INSTDIR\SHA256SUMS.txt"
   Delete "$INSTDIR\DEPENDENCIES.json"
   Delete "$INSTDIR\sbom.cdx.json"
+!ifdef UNIFIED_CANDIDATE
+  Delete "$INSTDIR\WINDOWS-BUILD.json"
+  Delete "$INSTDIR\WINDOWS-IMPORTS.json"
+  Delete "$INSTDIR\CLI-WINDOWS-IMPORTS.json"
+!endif
   !include "payload-uninstall.nsh"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

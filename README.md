@@ -8,13 +8,16 @@ rendezvous service; this is still a development release without Authenticode,
 not a complete AnyDesk-equivalent product.
 
 Current engineering work: [adaptive 0.3.4](docs/ADAPTIVE-0.3.4.md).
-Both endpoints must use the matching adaptive build. [Windows 7 is not supported](legacy/README.md);
-the separate legacy capability probe is not a released remote-access app.
+Both endpoints must use the matching adaptive build. The [unified Windows
+candidate](docs/UNIFIED_WINDOWS_0_3_4.md) builds one EXE and one installer with
+automatic Win7/10/11 graphics selection. Windows7 and Windows10 actual-OS
+acceptance is still unverified; compilation is not a support certification.
 
 ## Windows app, not a website
 
 `SENSOR-Remote.exe` is a native Rust/egui Windows application using wgpu's
-Direct3D 12 backend. It embeds the product owner's original SENSOR logo.
+Direct3D 12 backend on Windows10/11. The unified build contains an OpenGL
+backend for Windows7 in the same executable and UI. It embeds the product owner's original SENSOR logo.
 There is no HTML interface, browser, WebView, local web server, or hosted site.
 
 Open the EXE to see the persistent device ID, enter the other device's ID,
@@ -90,8 +93,10 @@ are `SENSOR-Remote.exe` (desktop), `SENSOR-CLI.exe` (console endpoint), and
 `sensor-relay.exe` (self-hosted provisioned relay). `sensor-rendezvous` is the
 Linux Web Service binary built by `deployment/render/Dockerfile`.
 They are unsigned: there is no supplied publisher signing certificate.
-This build requires 64-bit Windows 10/11, Direct3D 12 and Windows Media
-Foundation. The C runtime is statically linked: no separate VCRUNTIME140.dll
+The ordinary stable build requires 64-bit Windows10/11, Direct3D12 and Windows
+Media Foundation. The separately compiled **same application** in the unified
+candidate targets Win7SP1/10/11; Win7 runtime testing remains outstanding.
+The C runtime is statically linked: no separate VCRUNTIME140.dll
 installation is needed. Windows N editions need their Media Feature Pack.
 `scripts/installer.ps1` builds an unsigned, current-user NSIS installer from
 the output of `scripts/package.ps1`; it installs no service or firewall rule.

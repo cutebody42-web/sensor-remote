@@ -38,6 +38,18 @@ enum Page {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Same app, UI, identity and encrypted protocol on every OS. Only the
+    // presentation/capture backend changes. Never load DX12 on Windows 7.
+    let os = sensor_windows::desktop::os_version()?;
+    let platform = sensor_desktop::platform::Platform::select(
+        os,
+        cfg!(target_vendor = "win7"),
+        std::env::var("SENSOR_UI_RENDERER").ok().as_deref(),
+    )?;
+    let renderer = match platform.presentation {
+        sensor_desktop::platform::Presentation::OpenGl => eframe::Renderer::Glow,
+        sensor_desktop::platform::Presentation::Direct3D12 => eframe::Renderer::Wgpu,
+    };
     let arguments: Vec<_> = std::env::args_os().skip(1).collect();
     let config = match arguments.as_slice() {
         [] => PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?)
@@ -88,7 +100,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             .with_min_inner_size([800.0, 540.0])
             .with_icon(icon)
             .with_app_id("SENSOR.Remote"),
-        renderer: eframe::Renderer::Wgpu,
+        renderer,
         centered: true,
         ..Default::default()
     };
@@ -130,6 +142,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or("")
                 .to_owned();
             let mut app = App {
+                platform,
                 _lock: lock,
                 config,
                 identity,
@@ -209,6 +222,7 @@ struct ConsentPrompt {
     source_listener: bool,
 }
 struct App {
+    platform: sensor_desktop::platform::Platform,
     _lock: File,
     config: PathBuf,
     identity: DeviceIdentity,
@@ -1908,7 +1922,25 @@ impl App {
             ui.label(format!("Profile directory: {}", self.config.display()));
             ui.label(format!("Network: {}", self.status));
             ui.label("Transport in this window: direct TCP, provisioned relay, or Render HTTPS/WSS. Mutual pinned-key authentication; X25519 + Ed25519 + ChaCha20-Poly1305.");
-            ui.label("Window rendering: native egui / wgpu. No browser or WebView.");
+            ui.label(format!(
+                "OS {}.{}.{} • {} runtime build",
+                self.platform.os.0,
+                self.platform.os.1,
+                self.platform.os.2,
+                if self.platform.unified_build {
+                    "unified Win7/10/11"
+                } else {
+                    "modern Windows"
+                }
+            ));
+            ui.label(format!(
+                "Window rendering: {}. Capture: {}. No browser or WebView.",
+                self.platform.renderer_name(),
+                self.platform.capture_name()
+            ));
+            if self.platform.unified_build {
+                ui.label("Unified compatibility candidate: a successful build does not certify Windows 7/10. Actual OS acceptance is still required.");
+            }
             ui.add_enabled_ui(self.job.is_none(), |ui| {
                 field(
                     ui,

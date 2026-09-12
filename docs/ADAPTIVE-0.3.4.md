@@ -87,8 +87,10 @@ Ctrl+V. It keeps statistics in a fixed-height row so changing digits do not
 move the remote click target. Disconnect now requests authenticated graceful
 close with a two-second fallback abort; global Stop remains immediate.
 These follow-up changes still require a fresh installed-GUI gate.
-Windows 7 is **unsupported**, with a separate capability-probe architecture and
-remaining blockers in [legacy audit](../legacy/README.md). GitHub Windows Server
+Windows7 actual runtime remains **unverified**. September10 work now builds the
+[same application in one unified EXE/installer](UNIFIED_WINDOWS_0_3_4.md), with
+internal OpenGL/GDI selection on Win7 and DX12/DXGI on modern OSes. It is not a
+separate Legacy product. GitHub Windows Server
 runners do not prove Windows10 compatibility. No Win7/Win10 VM is available in
 the currently discovered local tools.
 

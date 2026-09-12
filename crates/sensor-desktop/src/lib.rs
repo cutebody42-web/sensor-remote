@@ -1,4 +1,5 @@
 //! Native desktop's testable worker boundary; no browser, HTML, or web server.
+pub mod platform;
 pub mod settings;
 pub mod unattended;
 pub mod updates;

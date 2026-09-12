@@ -38,7 +38,17 @@ foreach ($sensorDirectory in ($sensorDirectories | Sort-Object Length -Descendin
 # Mechanical manifest generation from exact packaged filenames.
 $sensorInstallLines | Set-Content -LiteralPath (Join-Path $sensorTemp 'payload-install.nsh') -Encoding utf8
 $sensorRemoveLines | Set-Content -LiteralPath (Join-Path $sensorTemp 'payload-uninstall.nsh') -Encoding utf8
-& $sensorCompiler /V2 /WX ("/DPACKAGE=" + $sensorPackage) ("/DOUTPUT=" + $sensorOutput) ("/DVERSION=" + $sensorVersion) (Join-Path $sensorTemp 'sensor.nsi')
+$sensorExtraDefines = @()
+$sensorPlatformPath = Join-Path $sensorPackage 'WINDOWS-BUILD.json'
+if (Test-Path -LiteralPath $sensorPlatformPath) {
+    $sensorPlatform = Get-Content -LiteralPath $sensorPlatformPath -Raw | ConvertFrom-Json
+    $sensorGui = Join-Path $sensorPackage 'SENSOR-Remote.exe'
+    if ($sensorPlatform.build_target -ne 'x86_64-win7-windows-msvc' -or $sensorPlatform.gui_sha256 -ne (Get-FileHash -LiteralPath $sensorGui -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'Unified package platform/hash mismatch.' }
+    & (Join-Path $PSScriptRoot 'audit-windows7-imports.ps1') -Executable $sensorGui
+    & (Join-Path $PSScriptRoot 'audit-windows7-imports.ps1') -Executable (Join-Path $sensorPackage 'SENSOR-CLI.exe')
+    $sensorExtraDefines = @('/DUNIFIED_CANDIDATE=1')
+}
+& $sensorCompiler /V2 /WX @sensorExtraDefines ("/DPACKAGE=" + $sensorPackage) ("/DOUTPUT=" + $sensorOutput) ("/DVERSION=" + $sensorVersion) (Join-Path $sensorTemp 'sensor.nsi')
 if ($LASTEXITCODE) { throw 'NSIS compilation failed' }
 Get-FileHash -LiteralPath $sensorOutput -Algorithm SHA256
 Write-Output "Built unsigned per-user installer: $sensorOutput"

@@ -1,5 +1,14 @@
 # Windows 7 engineering boundary — NOT SUPPORTED
 
+**September10 update:** the product now follows the owner's requirement for
+ONE application and installer. The real existing GUI builds as one Win7-target
+EXE containing both OpenGL and DX12, selected internally by OS. See the
+[unified build and current evidence](../docs/UNIFIED_WINDOWS_0_3_4.md).
+This folder remains only an earlier local GDI/codec diagnostic probe; it is
+not a second app or download. The historical blockers below are superseded
+where the unified report records a successful build/audit. Actual Win7 runtime
+acceptance still has not happened, so supported status remains NO.
+
 The shipping 0.3.4 executable targets Windows 10/11 x64. It must not be relabeled
 as Windows 7 compatible. No Win7 VM, successful legacy build, or Win7 launch has
 been verified in this session.

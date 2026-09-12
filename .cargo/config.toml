@@ -1,3 +1,8 @@
 [target.x86_64-pc-windows-msvc]
 # The installer must not depend on a separately installed MSVC redistributable.
 rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-win7-windows-msvc]
+# One executable: Win7-compatible std, no external VC/UCRT installation.
+# Slim COM errors retain HRESULTs without requiring WinRT error APIs (Win8+).
+rustflags = ["-C", "target-feature=+crt-static", "--cfg", "windows_slim_errors"]
