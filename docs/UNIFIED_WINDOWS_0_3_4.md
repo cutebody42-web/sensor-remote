@@ -80,6 +80,28 @@ Windows11, not Windows7. Full workspace tests, formatting and clippy passed
 again on September12. The HTTPS service reports20Mbps,60fps,1920x1080 limits;
 those are configured limits, not measured remote performance.
 
+The September12 unified installer was installed successfully on the owner's
+Windows11 laptop (exit0). Its installed GUI hash matches the hash above and
+the existing DPAPI identity file remained byte-for-byte unchanged. The package
+source revision is `960a0a7de28386e4cc5bd01e26b55a0769a0e2be`.
+The installer SHA256 is
+`10b63087f2434eb2fd46a0b605182307e6712255a93259968d1e7e825f22f32e`.
+The publisher-signed release manifest passed staging verification against
+version0.3.3. It is not Windows Authenticode signing, and the updater still
+rejects same-version/older releases; this0.3.4 engineering replacement was
+installed manually, without weakening anti-rollback checks.
+
+The Win7-target GDI capability probe also ran on Windows11: it captured and
+software-H.264 round-tripped one real1280x720 frame. This is evidence for the
+GDI/codec path only, not Win7 OS support, a GUI/network test or an FPS claim.
+
+For a separately labeled native-engine two-computer test, the existing
+`cross_desktop` fixture can be built with the same Win7 standard library and
+passed to `run-two-computer-gate.ps1 -NativeViewer -ViewerExecutable ...`.
+The script requires isolated public fixture metadata and logs the executable
+path/hash with `gui_test=false`. It must not be reported as a GUI acceptance
+test or distributed as a second application.
+
 - Full stable debug workspace suite passed on the owner's actual Win11 laptop;
   opt-in interactive desktop/clipboard tests remain ignored, not passed.
 - Three new OS/renderer selection tests passed; all24 desktop library tests
@@ -87,7 +109,7 @@ those are configured limits, not measured remote performance.
 - The deployed HTTPS/WSS encrypted chat, file transfer and denied-operation
   test passed on September10 with synthetic test data.
 - Unified EXE release build and known-loader-blocker audit passed locally.
-- The GUI helper launched the installed Adaptive3 executable instead of the
+- During the older September10 attempt, the GUI helper launched the installed Adaptive3 executable instead of the
   requested candidate. Process path and SHA256 exposed the mismatch. That
   window is not evidence that the unified build launched. A direct candidate
   launch was blocked by execution policy. No successful unified GUI, OpenGL,

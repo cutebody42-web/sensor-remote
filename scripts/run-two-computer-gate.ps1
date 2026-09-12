@@ -1,8 +1,14 @@
-param([long]$RunId = 34153021049, [string]$GuiViewerPublic, [switch]$NativeViewer)
+param([long]$RunId = 34153021049, [string]$GuiViewerPublic, [switch]$NativeViewer, [string]$ViewerExecutable)
 $ErrorActionPreference = 'Stop'
 $sensorRepo = (Resolve-Path -LiteralPath (Split-Path -Parent $PSScriptRoot)).Path
 $sensorViewerRoot = Join-Path (Split-Path -Parent $sensorRepo) 'native-cross-video-0.3.2\viewer'
 $sensorExe = Join-Path $sensorRepo 'target\release\examples\cross_desktop.exe'
+if ($ViewerExecutable) {
+    if (!$NativeViewer -or !$GuiViewerPublic) { throw 'An explicit viewer executable requires NativeViewer and its isolated public fixture metadata.' }
+    $sensorExe = (Resolve-Path -LiteralPath $ViewerExecutable).Path
+    if (!(Test-Path -LiteralPath $sensorExe -PathType Leaf) -or [IO.Path]::GetFileName($sensorExe) -ne 'cross_desktop.exe') { throw 'Expected the built cross_desktop.exe test fixture.' }
+}
+if ((!$GuiViewerPublic -or $NativeViewer) -and !(Test-Path -LiteralPath $sensorExe -PathType Leaf)) { throw 'Build the native viewer fixture before dispatching a cloud run.' }
 if (!$GuiViewerPublic -and (!(Test-Path -LiteralPath $sensorExe) -or !(Test-Path -LiteralPath (Join-Path $sensorViewerRoot 'identity.bin')))) { throw 'Prepared viewer fixture is missing' }
 $sensorEvidence = Join-Path (Split-Path -Parent $sensorRepo) ('two-computer-input-' + [Guid]::NewGuid().ToString('N'))
 $null = New-Item -ItemType Directory -Path $sensorEvidence
@@ -64,6 +70,7 @@ if ($GuiViewerPublic -and !$NativeViewer) {
         $sensorViewerRoot = Split-Path -Parent $GuiViewerPublic
     }
     Write-Output 'Cloud target prepared. Sending real native mouse, keyboard and wheel through SENSOR.'
+    Write-Output "NATIVE_VIEWER_BUILD path=$sensorExe sha256=$((Get-FileHash -LiteralPath $sensorExe -Algorithm SHA256).Hash) gui_test=false"
     & $sensorExe view-control $sensorViewerRoot $sensorPublic[0].FullName $sensorTarget[0].FullName 2>&1 | Tee-Object -FilePath (Join-Path $sensorEvidence 'laptop-viewer.log')
     if ($LASTEXITCODE) { throw 'Laptop native viewer/input failed' }
 }
